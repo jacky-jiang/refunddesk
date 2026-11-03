@@ -7,14 +7,16 @@
 3. 当前使用 `DB_SSLMODE=disable`，不使用 TLS 或 CA 证书。若服务支持 TLS，可改为 `require`（加密但不验证服务器身份）；启用 CA 验证时使用 `verify-full` 并设置 `DB_SSL_ROOT_CERT`。未指定模式时仍默认 `verify-full`，不会静默降级。
 4. Lightsail 防火墙和 PostgreSQL 访问规则须允许应用来源及数据库端口。应用账号需要 CONNECT、schema USAGE、业务表权限和 `alembic_version` 的 SELECT 权限。迁移需要 DDL 权限，可通过 `MIGRATION_DATABASE_URL` 使用独立账号。
 
+启动前请进入项目根目录。配置模块通过 `python-dotenv` 自动读取当前工作目录中的 `.env`，只在进程启动时加载；已有系统环境变量优先，修改文件后需重启进程。文件不存在时直接使用系统环境变量。禁用 `${...}` 插值，以保留密码中的字面字符。密码包含空格或 `#` 时请使用单引号包裹。测试使用 `.env.test` 时仍可通过 `uv run --env-file .env.test` 显式注入，其值优先于 `.env`。
+
 完整 `DATABASE_URL` 优先于分项配置；迁移优先使用 `MIGRATION_DATABASE_URL`，未配置时回退到同一应用连接。使用 URL 时须对密码特殊字符进行 URI 编码。API、Worker 和 Alembic 共用连接配置。
 
 ```bash
 uv sync --locked
 cp .env.example .env  # 仅首次创建，勿覆盖已有配置
 # 在安全环境中填写 .env 的 DB_HOST、DB_PORT、DB_PASSWORD
-uv run --locked --env-file .env alembic upgrade head
-uv run --locked --env-file .env uvicorn refunddesk.entrypoints.api:app --reload
+uv run --locked alembic upgrade head
+uv run --locked uvicorn refunddesk.entrypoints.api:app --reload
 ```
 
 演示 seed 仍仅允许 `APP_ENV=development` 且数据库名为 `refunddesk_dev`，不会向 `helloagents` 写入演示数据。需要演示数据时请单独使用可丢弃的本地开发库。
@@ -34,7 +36,7 @@ live 检测进程，ready 查询当前数据库的迁移版本，成功返回 20
 ```bash
 uv run --locked uvicorn refunddesk.entrypoints.mcp:app --port 8001
 uv run --locked uvicorn refunddesk.entrypoints.payment:app --port 8002
-uv run --locked --env-file .env python -m refunddesk.entrypoints.worker
+uv run --locked python -m refunddesk.entrypoints.worker
 ```
 
 MCP 在 /mcp 提供 SDK 的 HTTP ASGI 应用，当前未注册业务工具或授权，只绑定本机。支付进程只暴露 /health/live。Worker 启动时验证数据库后等待退出信号，--check 表示检查后退出。进程不会发起退款。
@@ -73,9 +75,9 @@ acme 和 beta 各有 support、supervisor、auditor 三个演示身份（用户�
 | DEMO-1004 | 支付已超过七天、未发货 |
 
 ## 验收
-配置测试可在无第三方依赖时运行：
+安装锁定依赖后，可单独运行配置测试：
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -p test_config.py -v
+uv run --locked python -m unittest discover -s tests -p test_config.py -v
 ```
 
 联网生成并提交锁文件后，在隔离测试库（例如 refunddesk_test）配置 .env.test，并使用 APP_ENV=test。运行：

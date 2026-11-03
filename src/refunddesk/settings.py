@@ -3,6 +3,16 @@ import os
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from dotenv import load_dotenv
+
+
+def load_environment() -> None:
+    """Load the working directory's .env once at startup; process values win."""
+    load_dotenv(Path.cwd() / ".env", override=False, interpolate=False)
+
+
+load_environment()
+
 
 def database_options(*, migration: bool = False) -> tuple[str, dict[str, str | int]]:
     url = (os.getenv("MIGRATION_DATABASE_URL") if migration else None) or os.getenv("DATABASE_URL")
