@@ -1,0 +1,47 @@
+name: RefundDesk I0
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    services:
+      pg:
+        image: postgres:17
+        env:
+          POSTGRES_USER: rd
+          POSTGRES_PASSWORD: ci_only
+          POSTGRES_DB: refunddesk_dev
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      APP_ENV: test
+      DB_SSLMODE: disable
+      DATABASE_URL: postgresql+psycopg://rd:ci_only@127.0.0.1:5432/refunddesk_dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.4'
+          enable-cache: false
+      - run: uv python install 3.12
+      - name: Bootstrap lock only for first build
+        if: hashFiles('uv.lock') == ''
+        run: uv lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refunddesk-dependency-lock
+          path: uv.lock
+      - run: uv sync --locked
+      - run: uv run --locked ruff check . && uv run --locked mypy src
+      - run: uv run --locked alembic upgrade head
+      - run: uv run --locked pytest -q
+      - name: Verify idempotent seed in disposable CI database
+        env:
+          APP_ENV: development
+        run: |
+          uv run --locked python -m refunddesk.entrypoints.seed
+          uv run --locked python -m refunddesk.entrypoints.seed
+          uv run --locked python scripts/verify_seed.py
+      - run: bash scripts/smoke.sh
+      - run: uv run --locked alembic downgrade base && uv run --locked alembic upgrade head
