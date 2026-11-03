@@ -1,13 +1,31 @@
 """Validated at point of use so a liveness probe never opens the database."""
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 def database_options(*, migration: bool = False) -> tuple[str, dict[str, str | int]]:
     url = (os.getenv("MIGRATION_DATABASE_URL") if migration else None) or os.getenv("DATABASE_URL")
     if not url:
-        raise ValueError("DATABASE_URL is required")
+        host = os.getenv("DB_HOST")
+        password = os.getenv("DB_PASSWORD")
+        if not host or not password:
+            raise ValueError("Set DB_HOST and DB_PASSWORD, or DATABASE_URL")
+        if any(char in host for char in "/@?#[]") or any(char.isspace() for char in host):
+            raise ValueError("DB_HOST must be an IP address or hostname without a port or URL")
+        try:
+            port = int(os.getenv("DB_PORT", "5432"))
+        except ValueError:
+            raise ValueError("DB_PORT must be an integer between 1 and 65535") from None
+        if not 1 <= port <= 65535:
+            raise ValueError("DB_PORT must be an integer between 1 and 65535")
+        user = os.getenv("DB_USER", "yijiang")
+        database = os.getenv("DB_NAME", "helloagents")
+        if not user or not database:
+            raise ValueError("DB_USER and DB_NAME must not be empty")
+        authority = f"[{host}]" if ":" in host else host
+        url = (f"postgresql+psycopg://{quote(user, safe='')}:{quote(password, safe='')}"
+               f"@{authority}:{port}/{quote(database, safe='')}")
     parts = urlsplit(url)
     if parts.scheme != "postgresql+psycopg" or not parts.hostname or not parts.path.strip("/"):
         raise ValueError("Expected a PostgreSQL psycopg URL with hostname and database")
@@ -15,15 +33,11 @@ def database_options(*, migration: bool = False) -> tuple[str, dict[str, str | i
         raise ValueError("Use DB_SSLMODE and DB_SSL_ROOT_CERT; percent-encode password characters")
     mode = os.getenv("DB_SSLMODE", "verify-full")
     options: dict[str, str | int] = {"sslmode": mode, "connect_timeout": 4}
-    if mode == "disable":
-        if (os.getenv("APP_ENV") not in {"development", "test"}
-                or parts.hostname not in {"localhost", "127.0.0.1", "::1", "db"}):
-            raise ValueError("Unencrypted connection permitted only for local development/test")
-    elif mode == "verify-full":
+    if mode == "verify-full":
         ca = os.getenv("DB_SSL_ROOT_CERT")
         if not ca or not Path(ca).is_file():
             raise ValueError("Set DB_SSL_ROOT_CERT to a readable provider CA file")
         options["sslrootcert"] = ca
-    else:
-        raise ValueError("Choose verify-full or local-only disable")
+    elif mode not in {"disable", "require"}:
+        raise ValueError("Choose verify-full, require, or disable")
     return url, options

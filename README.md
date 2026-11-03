@@ -1,21 +1,23 @@
 # RefundDesk · I0 工程基础
 本迭代提供 Python API、HTTP MCP、独立 Worker 和模拟支付四个入口。订单申请、审批、资金操作和登录从后续迭代实现。开发环境无需模型密钥。
 
-## 在 macOS 连接云开发库
-1. 使用 Python 3.12 和 uv（CI 使用 0.13.4）。解压后进入含 pyproject.toml 的目录。首次联网执行以下命令，保存生成的 uv.lock 并加入版本管理。已有锁的 checkout 直接使用 uv sync --locked。此交付环境无法访问 PyPI，因此发行包暂缺解析生成的锁。
-2. 在云数据库创建 refunddesk_dev 和专用账号，配置公网端点、来源 IP 白名单和 CA。应用账号需要 CONNECT、schema USAGE，以及业务表的相应权限，也要能 SELECT alembic_version。DDL 可使用独立的 MIGRATION_DATABASE_URL。用另一个角色建表时，由该角色向应用账号授予表权限并设置后续表的默认权限。
-3. 复制 .env.example 为 .env，替换端点、端口、密码和本地 CA 绝对路径。URL 中密码的特殊字符须按 URI 编码。下面的 uv run --env-file 会在进程启动时读取配置，无需把凭证写进 shell 历史。
-4. 在专用开发库执行迁移和初始化。seed 仅允许 development 环境和名为 refunddesk_dev 的数据库。重复执行不会覆盖订单原始日期或现有数据。
+## 连接 AWS Lightsail PostgreSQL
+1. 使用 Python 3.12 和 uv，执行 `uv sync --locked` 安装锁定依赖。
+2. 目标数据库为 `helloagents`，用户为 `yijiang`。通过环境变量设置 `DB_HOST`（实际 IP）、`DB_PORT`（默认 5432）和 `DB_PASSWORD`。数据库名和用户名也可用 `DB_NAME`、`DB_USER` 覆盖。IP 和密码不写入源码；可在安全的运行环境中注入，或复制 `.env.example` 为 Git 忽略的 `.env` 后填写。分项配置中的密码无需 URI 编码，连接代码会自动处理特殊字符。
+3. 当前使用 `DB_SSLMODE=disable`，不使用 TLS 或 CA 证书。若服务支持 TLS，可改为 `require`（加密但不验证服务器身份）；启用 CA 验证时使用 `verify-full` 并设置 `DB_SSL_ROOT_CERT`。未指定模式时仍默认 `verify-full`，不会静默降级。
+4. Lightsail 防火墙和 PostgreSQL 访问规则须允许应用来源及数据库端口。应用账号需要 CONNECT、schema USAGE、业务表权限和 `alembic_version` 的 SELECT 权限。迁移需要 DDL 权限，可通过 `MIGRATION_DATABASE_URL` 使用独立账号。
+
+完整 `DATABASE_URL` 优先于分项配置；迁移优先使用 `MIGRATION_DATABASE_URL`，未配置时回退到同一应用连接。使用 URL 时须对密码特殊字符进行 URI 编码。API、Worker 和 Alembic 共用连接配置。
 
 ```bash
-uv lock
 uv sync --locked
-cp .env.example .env
-# 编辑 .env 后继续
+cp .env.example .env  # 仅首次创建，勿覆盖已有配置
+# 在安全环境中填写 .env 的 DB_HOST、DB_PORT、DB_PASSWORD
 uv run --locked --env-file .env alembic upgrade head
-uv run --locked --env-file .env python -m refunddesk.entrypoints.seed
 uv run --locked --env-file .env uvicorn refunddesk.entrypoints.api:app --reload
 ```
+
+演示 seed 仍仅允许 `APP_ENV=development` 且数据库名为 `refunddesk_dev`，不会向 `helloagents` 写入演示数据。需要演示数据时请单独使用可丢弃的本地开发库。
 
 另一个终端执行：
 
