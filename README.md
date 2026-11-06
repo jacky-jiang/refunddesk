@@ -1,51 +1,153 @@
-# RefundDesk · I0 工程基础
-本迭代提供 Python API、HTTP MCP、独立 Worker 和模拟支付四个入口。订单申请、审批、资金操作和登录从后续迭代实现。开发环境无需模型密钥。
+# RefundDesk
 
-## 连接 AWS Lightsail PostgreSQL
-1. 使用 Python 3.12 和 uv，执行 `uv sync --locked` 安装锁定依赖。
-2. 目标数据库为 `helloagents`，用户为 `yijiang`。通过环境变量设置 `DB_HOST`（实际 IP）、`DB_PORT`（默认 5432）和 `DB_PASSWORD`。数据库名和用户名也可用 `DB_NAME`、`DB_USER` 覆盖。IP 和密码不写入源码；可在安全的运行环境中注入，或复制 `.env.example` 为 Git 忽略的 `.env` 后填写。分项配置中的密码无需 URI 编码，连接代码会自动处理特殊字符。
-3. 当前使用 `DB_SSLMODE=disable`，不使用 TLS 或 CA 证书。若服务支持 TLS，可改为 `require`（加密但不验证服务器身份）；启用 CA 验证时使用 `verify-full` 并设置 `DB_SSL_ROOT_CERT`。未指定模式时仍默认 `verify-full`，不会静默降级。
-4. Lightsail 防火墙和 PostgreSQL 访问规则须允许应用来源及数据库端口。应用账号需要 CONNECT、schema USAGE、业务表权限和 `alembic_version` 的 SELECT 权限。迁移需要 DDL 权限，可通过 `MIGRATION_DATABASE_URL` 使用独立账号。
+当前提供 Python API、HTTP MCP、独立 Worker 和模拟支付四个入口。数据库结构已更新到 Alembic `0002`，包含 14 张业务表。业务表的存在不代表退款、审批、登录等接口已经实现；当前可运行的是健康检查、MCP 路由和 Worker 数据库检查，不会发起真实退款。无需模型密钥，前端工作台尚未实现。
 
-启动前请进入项目根目录。配置模块通过 `python-dotenv` 自动读取当前工作目录中的 `.env`，只在进程启动时加载；已有系统环境变量优先，修改文件后需重启进程。文件不存在时直接使用系统环境变量。禁用 `${...}` 插值，以保留密码中的字面字符。密码包含空格或 `#` 时请使用单引号包裹。测试使用 `.env.test` 时仍可通过 `uv run --env-file .env.test` 显式注入，其值优先于 `.env`。
+## 1. 安装与环境配置（macOS / Linux）
 
-完整 `DATABASE_URL` 优先于分项配置；迁移优先使用 `MIGRATION_DATABASE_URL`，未配置时回退到同一应用连接。使用 URL 时须对密码特殊字符进行 URI 编码。API、Worker 和 Alembic 共用连接配置。
+安装 Python 3.12 和 uv，然后进入项目根目录。后续命令均从此目录执行。
 
 ```bash
+cd /你的项目路径/refunddesk
 uv sync --locked
-cp .env.example .env  # 仅首次创建，勿覆盖已有配置
-# 在安全环境中填写 .env 的 DB_HOST、DB_PORT、DB_PASSWORD
-uv run --locked alembic upgrade head
-uv run --locked uvicorn refunddesk.entrypoints.api:app --reload
+# 仅在 .env 不存在时创建，保留已有配置
+if [ ! -e .env ]; then cp .env.example .env; fi
 ```
 
-演示 seed 仍仅允许 `APP_ENV=development` 且数据库名为 `refunddesk_dev`，不会向 `helloagents` 写入演示数据。需要演示数据时请单独使用可丢弃的本地开发库。
+项目已有 `uv.lock`，正常安装不需要重新生成锁文件。`--locked` 要求依赖声明与锁文件一致。
 
-另一个终端执行：
+在本地 `.env` 或运行环境中设置以下变量，填写实际 IP、端口和密码：
+
+```dotenv
+APP_ENV=development
+DB_HOST=你的数据库IP
+DB_PORT=5432
+DB_NAME=helloagents
+DB_USER=yijiang
+DB_PASSWORD='你的数据库密码'
+DB_SCHEMA=refunddesk
+DB_SSLMODE=disable
+```
+
+`.env` 已被 Git 忽略，不要提交真实凭据。API、Worker、seed 和 Alembic 导入配置模块时，`python-dotenv` 自动读取**当前工作目录**的 `.env`，启动命令无需再加 `--env-file .env`。修改配置后重启进程。
+
+配置规则：
+
+- 系统环境变量优先于 `.env`；终端里以前 `export` 的值也会生效。`.env` 不存在时直接使用系统环境变量。
+- `DATABASE_URL` 优先于 `DB_HOST` 等分项变量。迁移和接管优先使用 `MIGRATION_DATABASE_URL`，其次为应用连接配置。旧 URL 可能覆盖新填的 IP、数据库名或密码。
+- 分项密码无需 URI 编码；完整 URL 中的密码需要 URI 编码。dotenv 禁用 `${...}` 插值，含空格或 `#` 的值应使用引号。
+- `DB_SCHEMA` 默认 `refunddesk`，应用、迁移和版本表使用同一 schema，不回退到 `public` 查找业务表。
+- `DB_SSLMODE=disable` 不使用 TLS 或 CA。服务支持 TLS 时可使用 `require`；完整证书验证使用 `verify-full` 并设置 `DB_SSL_ROOT_CERT`。未指定模式时默认 `verify-full`。
+
+Lightsail 防火墙及 PostgreSQL 访问规则需允许当前客户端 IP 和端口。数据库 `helloagents`、账号 `yijiang` 需事先存在；迁移不会创建数据库或账号。应用需要 schema USAGE、业务表权限及版本表 SELECT 权限；迁移和接管还需要相应 DDL 权限，可配置独立迁移账号。
+
+## 2. 根据数据库现状选择初始化方式
+
+### A. 已执行附件建表 SQL，并已有演示数据
+
+这是已有 `helloagents.refunddesk` 数据的场景。先备份数据库，确认 `.env` 中 `DB_SCHEMA=refunddesk`，然后执行：
+
+```bash
+uv run --locked python -m refunddesk.entrypoints.adopt_schema
+uv run --locked alembic current
+```
+
+接管命令会创建随机命名的核验 schema，读取 `src/refunddesk/schema.sql` 建立参考结构，比较字段类型、非空、默认值、主键、外键、唯一约束、CHECK 和索引。结构一致才登记 `0002`，不会修改已有业务数据；不一致则报告表名并回滚，不应绕过检查直接 `stamp`。
+
+该命令需要创建核验 schema、表以及写入版本表的权限。核验 schema 在成功时删除、失败时随事务回滚。锁等待超时为 5 秒，单语句超时为 60 秒，同 schema 的接管操作串行执行。它接受无版本、`0001` 或 `0002`，可重复执行，但不会核验演示数据的业务内容。
+
+`alembic current` 应显示 `0002 (head)`。此时再运行 `alembic upgrade head` 不会重复建表。**不要重新执行已有批次的演示数据脚本。**
+
+### B. 新库，尚未建立业务表
+
+配置好已存在的目标数据库后执行：
+
+```bash
+uv run --locked alembic upgrade head
+uv run --locked alembic current
+```
+
+迁移创建目标 schema、版本表和业务表：`0001` 创建四张基础表，`0002` 增加字段、约束及其余十张表。不会自动插入演示数据。
+
+### C. 已由 Alembic 管理，当前版本为 0001
+
+先确认原表及 `alembic_version` 所在的 schema。若在 `public`，设置 `DB_SCHEMA=public`；不要直接切换到 `refunddesk`，否则可能创建另一套表。
+
+```bash
+uv run --locked alembic current
+uv run --locked alembic upgrade head
+```
+
+升级保留已有行；如果原数据不满足新增约束，升级失败并回滚，需要先核对数据。`0002` 不支持 downgrade，以避免删除接管的业务数据；回退需使用审核过的备份恢复方案。
+
+## 3. 启动服务
+
+完成迁移或接管后，在不同终端分别进入项目根目录并启动所需服务：
+
+| 服务 | 启动命令 | 地址或行为 |
+|---|---|---|
+| API | `uv run --locked uvicorn refunddesk.entrypoints.api:app --reload` | 本机端口 8000 |
+| MCP | `uv run --locked uvicorn refunddesk.entrypoints.mcp:app --port 8001` | 本机端口 8001，路径 `/mcp` |
+| 模拟支付 | `uv run --locked uvicorn refunddesk.entrypoints.payment:app --port 8002` | 本机端口 8002 |
+| Worker | `uv run --locked python -m refunddesk.entrypoints.worker` | 数据库检查成功后等待退出信号 |
+
+在各终端按 `Ctrl+C` 停止对应进程。仅检查 Worker 的数据库就绪状态可执行：
+
+```bash
+uv run --locked python -m refunddesk.entrypoints.worker --check
+```
+
+在另一终端验证：
 
 ```bash
 curl -i http://127.0.0.1:8000/health/live
 curl -i http://127.0.0.1:8000/health/ready
+curl -i http://127.0.0.1:8002/health/live
+curl -i -X OPTIONS http://127.0.0.1:8001/mcp
 ```
 
-live 检测进程，ready 查询当前数据库的迁移版本，成功返回 200；数据库故障或迁移未完成返回 503 和 DATABASE_NOT_READY。缺失或非法配置会使 API 启动失败。每次 API 响应带 X-Request-ID，可在 JSON 请求日志中查找；日志省略参数、身份凭据和响应正文。
+API `live` 只检查进程；`ready` 查询目标 schema 的 `alembic_version`，要求版本为 `0002`。成功返回 200 和 `{"status":"ready"}`；数据库不可达、权限不足、缺失版本表或版本不匹配时返回 503 / `DATABASE_NOT_READY`。这不是对全部表结构的再次核验。API 响应包含 `X-Request-ID`，可关联 JSON 请求日志。
 
-## 其他进程
-分别在不同终端执行：
+模拟支付应返回包含 `mock-payment` 的健康响应。MCP OPTIONS 返回 200、204 或 405 均符合当前路由烟测预期，仅表示端点路由存在，不证明业务工具或授权已实现。
+
+## 4. 演示数据的两种来源
+
+| 来源 | 数据规模及限制 |
+|---|---|
+| 附件 `helloagents_seed.sql`（副本位于 `tests/fixtures/`） | 要求 helloagents/refunddesk；默认创建 `rd-demo-01-a`、`rd-demo-01-b` 两个租户、200 笔订单、10 笔退款申请和 26 条审计记录，同批次重复执行会报错并回滚 |
+| `python -m refunddesk.entrypoints.seed` | 仅允许 `APP_ENV=development` 且数据库名为 `refunddesk_dev`；创建 acme/beta 两个租户、6 个用户和 8 笔订单，可重复执行 |
+
+已有附件演示数据时，只需接管数据库。Python seed 不适用于 `helloagents`，也不用于补充完整的退款演示场景。
+
+附件中的 DEMO-1001 至 1004 分别表示可退款、已发货、未支付及超期；1005 至 1009 分别表示待审批、已拒绝、已退款、待核实及已批准。相对时间取决于首次执行时刻，之后不会自动刷新。
+
+## 5. 开发检查与测试
+
+不需要数据库的检查：
 
 ```bash
-uv run --locked uvicorn refunddesk.entrypoints.mcp:app --port 8001
-uv run --locked uvicorn refunddesk.entrypoints.payment:app --port 8002
-uv run --locked python -m refunddesk.entrypoints.worker
+uv run --locked ruff check .
+uv run --locked mypy src
+uv run --locked pytest tests/test_config.py tests/test_dotenv.py -q
 ```
 
-MCP 在 /mcp 提供 SDK 的 HTTP ASGI 应用，当前未注册业务工具或授权，只绑定本机。支付进程只暴露 /health/live。Worker 启动时验证数据库后等待退出信号，--check 表示检查后退出。进程不会发起退款。
-
-## 可选的容器联调
-需安装 Docker Compose v2，并先生成 uv.lock。与云开发库分开，Compose 使用内部 db 服务与独立卷，不会读取 DATABASE_URL 来连接云库。为本地开发库选择 URL 安全的随机密码，后续重启沿用同一密码。
+完整测试使用**独立、可丢弃的 PostgreSQL 测试库**，不要指向已有演示库或生产库。创建 `.env.test`，明确填写测试连接、`DB_SCHEMA`、`APP_ENV=test` 和 SSL 模式。如果开发 `.env` 中存在完整 URL，测试文件应显式提供测试用 `DATABASE_URL` 和 `MIGRATION_DATABASE_URL`，避免残留配置回退到开发数据库；运行前也应检查终端已导出的同名变量。
 
 ```bash
-# 在当前终端一次性设置并妥善保存；已有卷请沿用初始化时的值
+uv run --locked --env-file .env.test alembic upgrade head
+uv run --locked --env-file .env.test pytest -q
+uv run --locked --env-file .env.test bash scripts/smoke.sh
+```
+
+这里由 uv 显式读取 `.env.test`，项目的 dotenv 不会自动寻找该文件。迁移测试需要创建、删除临时 schema 的权限；会验证旧版本升级、结构不匹配拒绝接管、重复接管及完整演示数据保留。烟测临时使用 18000–18002 端口，结束时清理自己启动的服务。
+
+最近本地 PostgreSQL 17 验证：19 个测试、Ruff、mypy、服务烟测通过；两份附件原样执行后接管成功。未连接 Lightsail 验证实际远程数据，完整 Compose 构建也未在此次验证中执行。远端 CI 状态以 GitHub Actions 为准。
+
+## 6. 可选：Docker Compose 本地联调
+
+需要 Docker 和 Compose v2。Compose 使用内部 PostgreSQL 17、`refunddesk_dev` 数据库及独立卷，应用连接由 Compose 中的 `DATABASE_URL` 指向 `db`，不是 Lightsail。新建本地卷时生成密码；后续启动必须沿用该卷初始化时的密码。
+
+```bash
+# 仅首次初始化时生成，并妥善保存；已有卷请设置原密码
 export RD_LOCAL_PG_PASSWORD="$(openssl rand -hex 24)"
 docker compose up --build -d
 docker compose run --rm api python -m refunddesk.entrypoints.seed
@@ -54,77 +156,21 @@ docker compose logs worker
 docker compose stop
 ```
 
-Compose 仅将三个 HTTP 端口发布到宿主机回环地址。数据库端口仅容器网络可达。本地开发容器的初始化用户同时用于迁移和应用，请勿使用该配置创建公网生产实例。deploy/nginx.conf.example 是同宿主机 HTTPS 入口模板，需替换证书和域名；I0 仅 /health/live 已实现，业务 API 及 MCP 公网授权在后续迭代完成。
+Compose 的 migrate 服务在 API 和 Worker 启动前升级数据库，默认 schema 为 `refunddesk`。历史卷若将表建在 `public`，需先调整容器连接的 `DB_SCHEMA` 配置后再升级。三个 HTTP 端口仅发布到宿主机回环地址，数据库端口仅容器网络可达。
 
-## 数据与源码
-| 路径 | 内容 |
+## 7. 主要代码与迁移文件
+
+| 路径 | 用途 |
 |---|---|
-| src/refunddesk/entrypoints | API、MCP、Worker、支付、seed |
-| src/refunddesk/settings.py、db.py | 配置检查、异步数据库连接、迁移版本检查 |
-| migrations/versions | Alembic 初始迁移，创建 tenants、users、memberships、orders |
-| tests、scripts | 配置和服务测试、真实进程烟测、CI 演示数据检查 |
-| .github/workflows/ci.yml | 临时 PostgreSQL 17、静态检查、迁移接管及服务测试 |
+| `src/refunddesk/settings.py` | dotenv 加载、连接配置及 schema 校验 |
+| `src/refunddesk/db.py` | 异步数据库引擎、版本就绪检查 |
+| `src/refunddesk/entrypoints/` | API、MCP、支付、Worker、seed、adopt_schema |
+| `migrations/env.py` | 同步迁移连接、目标 schema 和版本表配置 |
+| `migrations/versions/0001_foundation.py` | 历史四表基础迁移 |
+| `migrations/versions/0002_refund_schema.py` | 对齐附件完整结构的增量迁移 |
+| `src/refunddesk/schema.sql` | 固定的 0002 结构定义，供迁移及接管核验读取，不含演示数据 |
+| `tests/fixtures/helloagents_seed.sql` | 附件 seed 副本，用于回归测试 |
+| `tests/`、`scripts/` | 配置、服务、迁移、数据保留测试及烟测 |
+| `.github/workflows/ci.yml` | 一次性 PostgreSQL 17、静态检查、测试和 seed 验证 |
 
-acme 和 beta 各有 support、supervisor、auditor 三个演示身份（用户名为租户-角色）。它们是数据库身份记录，I1 增加登录。两租户故意重复使用订单号，方便验证租户隔离。
-
-| 订单号 | 状态（首次初始化时） |
-|---|---|
-| DEMO-1001 | 刚支付、未发货 |
-| DEMO-1002 | 已支付、已发货 |
-| DEMO-1003 | 未支付 |
-| DEMO-1004 | 支付已超过七天、未发货 |
-
-## 验收
-安装锁定依赖后，可单独运行配置测试：
-```bash
-uv run --locked python -m unittest discover -s tests -p test_config.py -v
-```
-
-联网生成并提交锁文件后，在隔离测试库（例如 refunddesk_test）配置 .env.test，并使用 APP_ENV=test。运行：
-```bash
-uv sync --locked
-uv run --locked ruff check .
-uv run --locked mypy src
-uv run --locked --env-file .env.test alembic upgrade head
-uv run --locked --env-file .env.test pytest -q
-uv run --locked --env-file .env.test bash scripts/smoke.sh
-```
-
-GitHub Actions 在一次性数据库上额外验证两次 seed、租户数据量及迁移接管测试。首次缺锁的 CI 会生成锁并上传为构建产物；维护者须将其提交到项目。后续一律用 --locked 检查锁与项目声明一致。0002 不支持降级，以避免删除已有业务数据。
-
-本包验证记录：Python 3.12 编译、4 个独立单元测试、Shell 语法、TOML/YAML 解析通过。受执行环境限制，依赖锁、Ruff/mypy、真实 PostgreSQL、HTTP 服务和 Compose 全栈仍待联网验收。本包未执行远端 CI 或云端操作。
-
-
-## 已有 refunddesk schema 的接管
-
-连接配置新增 `DB_SCHEMA`，默认 `refunddesk`。API、Worker、seed 与 Alembic
-均使用该 schema，版本表也位于其中；不会回退到 public 查找业务表。
-若以前的 0001 位于 public，请明确设置 `DB_SCHEMA=public` 后升级，不要直接改变
-schema 配置，否则会在新 schema 创建另一套表。
-
-附件 SQL 对应版本 0002：14 张业务表，包含 users.enabled、orders.refund_state、
-退款审批及执行、任务、幂等记录、确认、agent 和审计表及相关约束和索引。
-已有库不要直接 stamp。先备份，在项目根目录配置好连接后执行：
-
-```bash
-uv run --locked python -m refunddesk.entrypoints.adopt_schema
-uv run --locked alembic current
-uv run --locked alembic upgrade head
-```
-
-接管命令在一个事务中创建随机命名的临时核验 schema，用项目保存的
-`src/refunddesk/schema.sql` 建立参考结构，比较字段类型、非空、默认值、主键、
-外键、唯一约束、CHECK 和普通/部分索引。要求目标结构一致（忽略约束及索引名称）；
-差异会报出表名并回滚，不登记版本。它不会检查演示数据内容，也不会修改业务数据。
-需要建 schema、表和版本表的权限；核验 schema 成功后删除，失败时随事务回滚。
-仅接受无版本、0001 或 0002，成功后记录 0002，可重复执行。
-
-新库执行 `alembic upgrade head`，从 0001 升到 0002。已有 0001 的库也走此路径，
-保留已有行；若原订单不满足新增约束，升级失败并回滚，需先核对数据。
-0002 包含业务数据表，为避免删除手动接管的数据，不支持 downgrade；需要回退时使用审核过的备份恢复方案。
-
-演示数据附件 `helloagents_seed.sql` 默认建立两个 rd-demo-01 租户、200 笔订单、
-10 笔退款申请和 26 条审计记录。它不是幂等脚本，同批次重复执行会报错并回滚。
-已有演示数据的库只执行接管命令，不重复 seed。回归测试使用附件副本，核对所有
-业务表的全部行在两次接管及 upgrade head 后保持一致。接管设置 5 秒锁等待、
-60 秒单语句超时，并串行化同 schema 的接管操作。
+后续数据库结构变化应新增迁移，不要直接修改已发布的 `0001`、`0002` 或作为其基准的 `schema.sql`。
