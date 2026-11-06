@@ -17,7 +17,8 @@ class FoundationTests(unittest.TestCase):
                              "DB_SSLMODE": "disable", "APP_ENV": "development"}, clear=True)
     def test_remote_plaintext_is_explicitly_supported(self) -> None:
         _, options = database_options()
-        self.assertEqual(options, {"sslmode": "disable", "connect_timeout": 4})
+        self.assertEqual(options, {"sslmode": "disable", "connect_timeout": 4,
+                                   "options": "-csearch_path=refunddesk,pg_catalog"})
 
     @patch.dict(os.environ, {"DATABASE_URL": "postgresql+psycopg://u:p@localhost/dev",
                              "DB_SSLMODE": "disable", "APP_ENV": "test"}, clear=True)

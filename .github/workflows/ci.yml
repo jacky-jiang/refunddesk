@@ -44,4 +44,4 @@ jobs:
           uv run --locked python -m refunddesk.entrypoints.seed
           uv run --locked python scripts/verify_seed.py
       - run: bash scripts/smoke.sh
-      - run: uv run --locked alembic downgrade base && uv run --locked alembic upgrade head
+      - run: uv run --locked alembic upgrade head

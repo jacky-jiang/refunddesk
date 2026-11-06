@@ -1,5 +1,6 @@
 """Validated at point of use so a liveness probe never opens the database."""
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -12,6 +13,13 @@ def load_environment() -> None:
 
 
 load_environment()
+
+
+def database_schema() -> str:
+    schema = os.getenv("DB_SCHEMA", "refunddesk")
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", schema) or schema.startswith("pg_"):
+        raise ValueError("DB_SCHEMA must be a lowercase PostgreSQL identifier outside pg_ schemas")
+    return schema
 
 
 def database_options(*, migration: bool = False) -> tuple[str, dict[str, str | int]]:
@@ -42,7 +50,8 @@ def database_options(*, migration: bool = False) -> tuple[str, dict[str, str | i
     if parts.query or parts.fragment:
         raise ValueError("Use DB_SSLMODE and DB_SSL_ROOT_CERT; percent-encode password characters")
     mode = os.getenv("DB_SSLMODE", "verify-full")
-    options: dict[str, str | int] = {"sslmode": mode, "connect_timeout": 4}
+    options: dict[str, str | int] = {"sslmode": mode, "connect_timeout": 4,
+                                     "options": f"-csearch_path={database_schema()},pg_catalog"}
     if mode == "verify-full":
         ca = os.getenv("DB_SSL_ROOT_CERT")
         if not ca or not Path(ca).is_file():

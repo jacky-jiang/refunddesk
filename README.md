@@ -63,7 +63,7 @@ Compose 仅将三个 HTTP 端口发布到宿主机回环地址。数据库端口
 | src/refunddesk/settings.py、db.py | 配置检查、异步数据库连接、迁移版本检查 |
 | migrations/versions | Alembic 初始迁移，创建 tenants、users、memberships、orders |
 | tests、scripts | 配置和服务测试、真实进程烟测、CI 演示数据检查 |
-| .github/workflows/ci.yml | 临时 PostgreSQL 17、静态检查、迁移往返及服务测试 |
+| .github/workflows/ci.yml | 临时 PostgreSQL 17、静态检查、迁移接管及服务测试 |
 
 acme 和 beta 各有 support、supervisor、auditor 三个演示身份（用户名为租户-角色）。它们是数据库身份记录，I1 增加登录。两租户故意重复使用订单号，方便验证租户隔离。
 
@@ -90,6 +90,41 @@ uv run --locked --env-file .env.test pytest -q
 uv run --locked --env-file .env.test bash scripts/smoke.sh
 ```
 
-GitHub Actions 在一次性数据库上额外验证两次 seed、租户数据量和迁移往返。首次缺锁的 CI 会生成锁并上传为构建产物；维护者须将其提交到项目。后续一律用 --locked 检查锁与项目声明一致。降级会删除 I0 表，仅在可丢弃的测试实例执行。
+GitHub Actions 在一次性数据库上额外验证两次 seed、租户数据量及迁移接管测试。首次缺锁的 CI 会生成锁并上传为构建产物；维护者须将其提交到项目。后续一律用 --locked 检查锁与项目声明一致。0002 不支持降级，以避免删除已有业务数据。
 
 本包验证记录：Python 3.12 编译、4 个独立单元测试、Shell 语法、TOML/YAML 解析通过。受执行环境限制，依赖锁、Ruff/mypy、真实 PostgreSQL、HTTP 服务和 Compose 全栈仍待联网验收。本包未执行远端 CI 或云端操作。
+
+
+## 已有 refunddesk schema 的接管
+
+连接配置新增 `DB_SCHEMA`，默认 `refunddesk`。API、Worker、seed 与 Alembic
+均使用该 schema，版本表也位于其中；不会回退到 public 查找业务表。
+若以前的 0001 位于 public，请明确设置 `DB_SCHEMA=public` 后升级，不要直接改变
+schema 配置，否则会在新 schema 创建另一套表。
+
+附件 SQL 对应版本 0002：14 张业务表，包含 users.enabled、orders.refund_state、
+退款审批及执行、任务、幂等记录、确认、agent 和审计表及相关约束和索引。
+已有库不要直接 stamp。先备份，在项目根目录配置好连接后执行：
+
+```bash
+uv run --locked python -m refunddesk.entrypoints.adopt_schema
+uv run --locked alembic current
+uv run --locked alembic upgrade head
+```
+
+接管命令在一个事务中创建随机命名的临时核验 schema，用项目保存的
+`src/refunddesk/schema.sql` 建立参考结构，比较字段类型、非空、默认值、主键、
+外键、唯一约束、CHECK 和普通/部分索引。要求目标结构一致（忽略约束及索引名称）；
+差异会报出表名并回滚，不登记版本。它不会检查演示数据内容，也不会修改业务数据。
+需要建 schema、表和版本表的权限；核验 schema 成功后删除，失败时随事务回滚。
+仅接受无版本、0001 或 0002，成功后记录 0002，可重复执行。
+
+新库执行 `alembic upgrade head`，从 0001 升到 0002。已有 0001 的库也走此路径，
+保留已有行；若原订单不满足新增约束，升级失败并回滚，需先核对数据。
+0002 包含业务数据表，为避免删除手动接管的数据，不支持 downgrade；需要回退时使用审核过的备份恢复方案。
+
+演示数据附件 `helloagents_seed.sql` 默认建立两个 rd-demo-01 租户、200 笔订单、
+10 笔退款申请和 26 条审计记录。它不是幂等脚本，同批次重复执行会报错并回滚。
+已有演示数据的库只执行接管命令，不重复 seed。回归测试使用附件副本，核对所有
+业务表的全部行在两次接管及 upgrade head 后保持一致。接管设置 5 秒锁等待、
+60 秒单语句超时，并串行化同 schema 的接管操作。
