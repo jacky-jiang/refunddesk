@@ -174,3 +174,25 @@ Compose 的 migrate 服务在 API 和 Worker 启动前升级数据库，默认 s
 | `.github/workflows/ci.yml` | 一次性 PostgreSQL 17、静态检查、测试和 seed 验证 |
 
 后续数据库结构变化应新增迁移，不要直接修改已发布的 `0001`、`0002` 或作为其基准的 `schema.sql`。
+
+
+## 8. 多 AI 编码工具规则
+
+统一规则源为 `.ai/rules.json`。Codex 使用 `AGENTS.md`，Claude Code 使用 `CLAUDE.md`，
+Copilot 使用 `.github/copilot-instructions.md`，Cursor 使用 `.cursor/rules/refunddesk.mdc`；
+其他工具可显式读取 `docs/ai-coding-guidelines.md`。实际加载行为取决于工具及版本，应在新会话确认。
+
+规则只在源文件编辑，再同步生成，不能单独修改生成文件：
+
+```bash
+python scripts/render_ai_rules.py
+python scripts/render_ai_rules.py --check
+python -m unittest discover -s tests/rules -v
+python scripts/check_architecture.py
+```
+
+独立工作流 `architecture-rules` 检查规则漂移、工具回归及静态导入边界，原业务 CI 保留。
+仓库管理员可将该检查设为分支保护的必需检查；添加工作流不会自动启用分支保护。
+检查器不验证动态导入、事务、授权或前端依赖，仍需业务测试与代码审阅。
+详细接入说明见 [规则接入文档](docs/ai-rules-setup.md)，目录约定见
+[架构契约](docs/architecture-contract.md)，本次验证见 [验证记录](docs/ai-rules-validation.md)。
