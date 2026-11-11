@@ -31,6 +31,9 @@ services:
   worker:
     <<: *app
     command: [python, -m, refunddesk.entrypoints.worker]
+  expiry:
+    <<: *app
+    command: [python, -m, refunddesk.entrypoints.expiry]
   mcp:
     build: .
     command: [uvicorn, refunddesk.entrypoints.mcp:app, --host, 0.0.0.0, --port, "8001"]

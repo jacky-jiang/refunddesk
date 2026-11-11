@@ -1,6 +1,6 @@
 # RefundDesk
 
-当前提供 Python API、HTTP MCP、独立 Worker 和模拟支付四个入口。数据库结构已更新到 Alembic `0002`，包含 14 张业务表。业务表的存在不代表退款、审批、登录等接口已经实现；当前可运行的是健康检查、MCP 路由和 Worker 数据库检查，不会发起真实退款。无需模型密钥，前端工作台尚未实现。
+当前 I1 提供登录会话、租户角色、订单与政策查询、资格评估、操作确认、创建/取消申请、主管审批、审计和过期扫描。HTTP API 不依赖模型。数据库最新版本为 Alembic `0003`，在原 `0002` 的 14 张业务表基础上新增凭据、会话和安全事件表。批准会原子创建执行任务，但 I1 不领取任务或调用支付；MCP 业务工具和前端仍属于后续迭代。
 
 ## 1. 安装与环境配置（macOS / Linux）
 
@@ -49,13 +49,14 @@ Lightsail 防火墙及 PostgreSQL 访问规则需允许当前客户端 IP 和端
 ```bash
 uv run --locked python -m refunddesk.entrypoints.adopt_schema
 uv run --locked alembic current
+uv run --locked alembic upgrade head
 ```
 
 接管命令会创建随机命名的核验 schema，读取 `src/refunddesk/schema.sql` 建立参考结构，比较字段类型、非空、默认值、主键、外键、唯一约束、CHECK 和索引。结构一致才登记 `0002`，不会修改已有业务数据；不一致则报告表名并回滚，不应绕过检查直接 `stamp`。
 
 该命令需要创建核验 schema、表以及写入版本表的权限。核验 schema 在成功时删除、失败时随事务回滚。锁等待超时为 5 秒，单语句超时为 60 秒，同 schema 的接管操作串行执行。它接受无版本、`0001` 或 `0002`，可重复执行，但不会核验演示数据的业务内容。
 
-`alembic current` 应显示 `0002 (head)`。此时再运行 `alembic upgrade head` 不会重复建表。**不要重新执行已有批次的演示数据脚本。**
+`adopt_schema` 仅登记 `0002` 基线，之后 `alembic upgrade head` 追加身份表到 `0003 (head)`。已经升级到 `0003` 的库不再执行接管命令。**不要重新执行已有批次的演示数据脚本。**
 
 ### B. 新库，尚未建立业务表
 
@@ -66,7 +67,7 @@ uv run --locked alembic upgrade head
 uv run --locked alembic current
 ```
 
-迁移创建目标 schema、版本表和业务表：`0001` 创建四张基础表，`0002` 增加字段、约束及其余十张表。不会自动插入演示数据。
+迁移创建目标 schema、版本表和业务表：`0001` 创建四张基础表，`0002` 增加字段、约束及其余十张表。`0003` 再新增登录凭据、会话与安全事件表，不会自动插入演示数据或默认密码。
 
 ### C. 已由 Alembic 管理，当前版本为 0001
 
@@ -88,7 +89,8 @@ uv run --locked alembic upgrade head
 | API | `uv run --locked uvicorn refunddesk.entrypoints.api:app --reload` | 本机端口 8000 |
 | MCP | `uv run --locked uvicorn refunddesk.entrypoints.mcp:app --port 8001` | 本机端口 8001，路径 `/mcp` |
 | 模拟支付 | `uv run --locked uvicorn refunddesk.entrypoints.payment:app --port 8002` | 本机端口 8002 |
-| Worker | `uv run --locked python -m refunddesk.entrypoints.worker` | 数据库检查成功后等待退出信号 |
+| Worker | `uv run --locked python -m refunddesk.entrypoints.worker` | 保留的 I0 入口，仅数据库检查，不执行支付 |
+| 过期扫描 | `uv run --locked python -m refunddesk.entrypoints.expiry` | 每轮最多处理 100 条过期申请，间隔 30 秒；不调用支付 |
 
 在各终端按 `Ctrl+C` 停止对应进程。仅检查 Worker 的数据库就绪状态可执行：
 
@@ -105,7 +107,7 @@ curl -i http://127.0.0.1:8002/health/live
 curl -i -X OPTIONS http://127.0.0.1:8001/mcp
 ```
 
-API `live` 只检查进程；`ready` 查询目标 schema 的 `alembic_version`，要求版本为 `0002`。成功返回 200 和 `{"status":"ready"}`；数据库不可达、权限不足、缺失版本表或版本不匹配时返回 503 / `DATABASE_NOT_READY`。这不是对全部表结构的再次核验。API 响应包含 `X-Request-ID`，可关联 JSON 请求日志。
+API `live` 只检查进程；`ready` 查询目标 schema 的 `alembic_version`，要求版本为 `0003`。成功返回 200 和 `{"status":"ready"}`；数据库不可达、权限不足、缺失版本表或版本不匹配时返回 503 / `DATABASE_NOT_READY`。这不是对全部表结构的再次核验。API 响应包含 `X-Request-ID`，可关联 JSON 请求日志。
 
 模拟支付应返回包含 `mock-payment` 的健康响应。MCP OPTIONS 返回 200、204 或 405 均符合当前路由烟测预期，仅表示端点路由存在，不证明业务工具或授权已实现。
 
@@ -114,7 +116,7 @@ API `live` 只检查进程；`ready` 查询目标 schema 的 `alembic_version`�
 | 来源 | 数据规模及限制 |
 |---|---|
 | 附件 `helloagents_seed.sql`（副本位于 `tests/fixtures/`） | 要求 helloagents/refunddesk；默认创建 `rd-demo-01-a`、`rd-demo-01-b` 两个租户、200 笔订单、10 笔退款申请和 26 条审计记录，同批次重复执行会报错并回滚 |
-| `python -m refunddesk.entrypoints.seed` | 仅允许 `APP_ENV=development` 且数据库名为 `refunddesk_dev`；创建 acme/beta 两个租户、6 个用户和 8 笔订单，可重复执行 |
+| `python -m refunddesk.entrypoints.seed` | 仅允许 `APP_ENV=development` 且数据库名为 `refunddesk_dev`；创建 acme/beta 两个租户、6 个用户、8 笔订单及 v1 政策，可重复执行；不设置默认密码 |
 
 已有附件演示数据时，只需接管数据库。Python seed 不适用于 `helloagents`，也不用于补充完整的退款演示场景。
 
@@ -140,7 +142,7 @@ uv run --locked --env-file .env.test bash scripts/smoke.sh
 
 这里由 uv 显式读取 `.env.test`，项目的 dotenv 不会自动寻找该文件。迁移测试需要创建、删除临时 schema 的权限；会验证旧版本升级、结构不匹配拒绝接管、重复接管及完整演示数据保留。烟测临时使用 18000–18002 端口，结束时清理自己启动的服务。
 
-最近本地 PostgreSQL 17 验证：19 个测试、Ruff、mypy、服务烟测通过；两份附件原样执行后接管成功。未连接 Lightsail 验证实际远程数据，完整 Compose 构建也未在此次验证中执行。远端 CI 状态以 GitHub Actions 为准。
+I0 基线阶段曾通过 19 个测试并验证两份附件原样执行后接管成功；本轮 I1 全量 69 个测试、Ruff、mypy、架构检查及服务烟测通过，详见 docs/i1-validation.md。未连接 Lightsail 验证实际远程数据，完整 Compose 构建也未在此次验证中执行。远端 CI 状态以 GitHub Actions 为准。
 
 ## 6. 可选：Docker Compose 本地联调
 
@@ -173,7 +175,7 @@ Compose 的 migrate 服务在 API 和 Worker 启动前升级数据库，默认 s
 | `tests/`、`scripts/` | 配置、服务、迁移、数据保留测试及烟测 |
 | `.github/workflows/ci.yml` | 一次性 PostgreSQL 17、静态检查、测试和 seed 验证 |
 
-后续数据库结构变化应新增迁移，不要直接修改已发布的 `0001`、`0002` 或作为其基准的 `schema.sql`。
+后续数据库结构变化应新增迁移，不要直接修改已发布的 `0001`、`0002`、`0003` 或作为 0002 基准的 `schema.sql`。
 
 
 ## 8. 多 AI 编码工具规则
@@ -196,3 +198,37 @@ python scripts/check_architecture.py
 检查器不验证动态导入、事务、授权或前端依赖，仍需业务测试与代码审阅。
 详细接入说明见 [规则接入文档](docs/ai-rules-setup.md)，目录约定见
 [架构契约](docs/architecture-contract.md)，本次验证见 [验证记录](docs/ai-rules-validation.md)。
+
+
+## 9. I1 登录与 HTTP 演示
+
+先 `alembic upgrade head` 到 0003，再为已有用户单独设置密码（交互输入，至少 12 字符，
+不通过命令行参数传入密码）。密码更新会注销该用户全部会话：
+
+```bash
+# Python seed 的本地演示账号
+uv run --locked python -m refunddesk.entrypoints.set_password acme-support
+uv run --locked python -m refunddesk.entrypoints.set_password acme-supervisor
+uv run --locked python -m refunddesk.entrypoints.set_password acme-auditor
+# 附件 seed 的用户 ID 则是 rd-demo-01-a-support 等，不要重新执行 seed
+```
+
+登录使用 `users.id` 和经过成员关系验证的 `tenant_id`。`POST /api/auth/login` 必须带
+`X-CSRF-Protection: 1`，JSON 请求包含 user_id、tenant_id、password。成功设置 HttpOnly、
+SameSite=Strict 会话 Cookie，并返回 csrf_token；后续写请求使用该 Cookie 和
+`X-CSRF-Token`，退出后会话失效。生产（APP_ENV 非 development/test）Cookie 必须走 HTTPS；
+反向代理后配置 PUBLIC_ORIGIN 为浏览器访问的准确 origin（不含路径）。
+
+API 启动后可在 `/docs` 查看 OpenAPI 并调用接口。完整接口、字段、错误码、期限和演示步骤见
+[API 契约](docs/i1-api.md)，已确认决策见 [ADR](docs/adr/0001-i1-business-boundary.md)，
+验收追踪见 [I1 验收](docs/i1-acceptance.md)。没有为账号配置密码前，登录会统一拒绝。
+
+过期扫描仅关闭 pending/approved 的超期申请并记录审计，不会把 executing 或后续状态撤销：
+
+```bash
+uv run --locked python -m refunddesk.entrypoints.expiry --once
+uv run --locked python -m refunddesk.entrypoints.expiry
+```
+
+旧附件中的演示申请时间不会刷新；启动扫描会按这些真实截止时间关闭已过期记录。
+Compose 已包含 expiry 服务。I1 不会把 approved 展示成退款成功，也不会消费已创建的 execute 任务。

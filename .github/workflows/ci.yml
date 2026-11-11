@@ -1,4 +1,4 @@
-name: RefundDesk I0
+name: RefundDesk I1
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
@@ -44,4 +44,5 @@ jobs:
           uv run --locked python -m refunddesk.entrypoints.seed
           uv run --locked python scripts/verify_seed.py
       - run: bash scripts/smoke.sh
+      - run: uv run --locked python -m refunddesk.entrypoints.expiry --once
       - run: uv run --locked alembic upgrade head

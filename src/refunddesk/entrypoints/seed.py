@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from datetime import UTC, datetime, timedelta
 
@@ -19,6 +20,11 @@ async def seed() -> None:
             for tenant in ("acme", "beta"):
                 await conn.execute(text("INSERT INTO tenants VALUES (:t,:t) ON CONFLICT DO NOTHING"),
                                    {"t": tenant})
+                rules = {"apply_hours": 168, "approval_hours": 24, "execution_start_minutes": 30,
+                         "full_refund_only": True, "unshipped_only": True, "supervisor_required": True}
+                await conn.execute(text("""INSERT INTO refund_policies
+                    (tenant_id,version,effective_at,rules) VALUES (:t,'v1',:now,CAST(:rules AS jsonb))
+                    ON CONFLICT DO NOTHING"""), {"t": tenant, "now": now, "rules": json.dumps(rules)})
                 for role in ("support", "supervisor", "auditor"):
                     user = f"{tenant}-{role}"
                     await conn.execute(text("INSERT INTO users VALUES (:u,:u) ON CONFLICT DO NOTHING"),
