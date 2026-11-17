@@ -43,7 +43,7 @@ def test_adopt_preserves_data_and_repeats(isolated_schema):
     command.upgrade(Config('alembic.ini'), 'head')
     with engine.connect() as conn:
         assert conn.scalar(text('SELECT name FROM tenants')) == 'Preserve me'
-        assert conn.scalar(text('SELECT version_num FROM alembic_version')) == '0002'
+        assert conn.scalar(text('SELECT version_num FROM alembic_version')) == '0003'
 
 
 def test_adopt_rejects_constraint_drift(isolated_schema):
@@ -63,7 +63,7 @@ def test_upgrade_from_foundation_matches_manual_schema(isolated_schema):
     command.upgrade(Config('alembic.ini'), '0001')
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO tenants VALUES ('existing','Preserve me')"))
-    command.upgrade(Config('alembic.ini'), 'head')
+    command.upgrade(Config('alembic.ini'), '0002')
     # Adoption compares every column, constraint and non-constraint index to the SQL.
     adopt()
     with engine.connect() as conn:

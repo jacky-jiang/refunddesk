@@ -24,12 +24,12 @@
 ### I1 数据基线检查
 
 当前工程已经实现 Alembic 0001→0002 迁移，默认通过 DB_SCHEMA=refunddesk
-统一应用和迁移的 schema；版本检查要求 0002。src/refunddesk/schema.sql 固定定义
+统一应用和迁移的 schema；I1 新增 0003 身份迁移，运行时版本检查要求 0003。src/refunddesk/schema.sql 固定定义
 0002 的 14 张业务表，adopt_schema 会核对结构后登记版本，不修改业务数据。
 已有 public/0001 数据库需显式设置 DB_SCHEMA=public 后按现有升级流程处理。
 
 首次业务数据库变更前仍应核对实际连接目标、schema、revision、表/约束/索引和数据保留要求。
-源码现状不能证明远程数据库现状。复用 README 中的新库、旧版本升级或已有库接管流程，
+0002 的接管后继续 upgrade head 到 0003。源码现状不能证明远程数据库现状。复用 README 中的新库、旧版本升级或已有库接管流程，
 不要重新设计接管、盲目 stamp 或重跑初始化。附件 seed 同批次重复执行会失败；保留已有演示数据。
 
 
