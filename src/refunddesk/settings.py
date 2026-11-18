@@ -60,3 +60,56 @@ def database_options(*, migration: bool = False) -> tuple[str, dict[str, str | i
     elif mode not in {"disable", "require"}:
         raise ValueError("Choose verify-full, require, or disable")
     return url, options
+
+
+def payment_database_schema() -> str:
+    schema = os.getenv('PAYMENT_DB_SCHEMA', 'refund')
+    if not re.fullmatch(r'[a-z_][a-z0-9_]{0,62}', schema) or schema.startswith('pg_'):
+        raise ValueError('PAYMENT_DB_SCHEMA must be a lowercase PostgreSQL identifier outside pg_ schemas')
+    return schema
+
+
+def payment_database_options() -> tuple[str, dict[str, str | int]]:
+    """Payment settings use a separate DB, with optional shared instance credentials."""
+    url = os.getenv('PAYMENT_DATABASE_URL')
+    if not url:
+        host = os.getenv('PAYMENT_DB_HOST') or os.getenv('DB_HOST')
+        password = os.getenv('PAYMENT_DB_PASSWORD') or os.getenv('DB_PASSWORD')
+        if not host or not password:
+            raise ValueError('Set PAYMENT_DB_HOST and PAYMENT_DB_PASSWORD (or DB_HOST and DB_PASSWORD), or PAYMENT_DATABASE_URL')
+        if any(char in host for char in '/@?#[]') or any(char.isspace() for char in host):
+            raise ValueError('PAYMENT_DB_HOST must be a hostname or IP address without a port')
+        try:
+            port = int(os.getenv('PAYMENT_DB_PORT') or os.getenv('DB_PORT') or '5432')
+        except ValueError:
+            raise ValueError('PAYMENT_DB_PORT must be an integer between 1 and 65535') from None
+        if not 1 <= port <= 65535:
+            raise ValueError('PAYMENT_DB_PORT must be an integer between 1 and 65535')
+        user = os.getenv('PAYMENT_DB_USER') or os.getenv('DB_USER', 'yijiang')
+        database = os.getenv('PAYMENT_DB_NAME', 'refunddesk_payment')
+        if not user or not database:
+            raise ValueError('PAYMENT_DB_USER and PAYMENT_DB_NAME must not be empty')
+        authority = f'[{host}]' if ':' in host else host
+        url = (f"postgresql+psycopg://{quote(user, safe='')}:{quote(password, safe='')}"
+               f"@{authority}:{port}/{quote(database, safe='')}")
+    parts = urlsplit(url)
+    if parts.scheme != 'postgresql+psycopg' or not parts.hostname or not parts.path.strip('/') or parts.fragment:
+        raise ValueError('Expected a PostgreSQL psycopg payment URL with hostname and database')
+    # URL query parameters remain supported for existing deployments.
+    from urllib.parse import parse_qs
+    query = parse_qs(parts.query)
+    mode = os.getenv('PAYMENT_DB_SSLMODE') or os.getenv('DB_SSLMODE') or 'verify-full'
+    options: dict[str, str | int] = {'connect_timeout': 4,
+        'options': f'-csearch_path={payment_database_schema()},pg_catalog'}
+    if 'options' in query:
+        raise ValueError('Configure payment search path with PAYMENT_DB_SCHEMA, not URL options')
+    if 'sslmode' not in query:
+        options['sslmode'] = mode
+        if mode == 'verify-full':
+            ca = os.getenv('PAYMENT_DB_SSL_ROOT_CERT') or os.getenv('DB_SSL_ROOT_CERT')
+            if not ca or not Path(ca).is_file():
+                raise ValueError('Set PAYMENT_DB_SSL_ROOT_CERT or DB_SSL_ROOT_CERT to a readable provider CA file')
+            options['sslrootcert'] = ca
+        elif mode not in {'disable', 'require'}:
+            raise ValueError('Choose verify-full, require, or disable for PAYMENT_DB_SSLMODE')
+    return url, options

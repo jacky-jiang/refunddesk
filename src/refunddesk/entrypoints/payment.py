@@ -14,15 +14,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from refunddesk.settings import payment_database_options
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    url = os.environ.get('PAYMENT_DATABASE_URL', '')
     token = os.environ.get('PAYMENT_SERVICE_TOKEN', '')
-    if url and not url.startswith('postgresql+psycopg://'):
-        raise RuntimeError('Invalid PAYMENT_DATABASE_URL')
-    app.state.engine = (create_async_engine(url, pool_pre_ping=True, hide_parameters=True)
-                        if url else None)
+    configured = any(os.getenv(name) for name in ('PAYMENT_DATABASE_URL', 'PAYMENT_DB_HOST',
+                                                     'PAYMENT_DB_PASSWORD', 'DB_HOST', 'DB_PASSWORD'))
+    if configured:
+        url, options = payment_database_options()
+        app.state.engine = create_async_engine(url, connect_args=options, pool_pre_ping=True,
+                                               hide_parameters=True)
+    else:
+        app.state.engine = None
     app.state.token = token
     try:
         yield

@@ -84,10 +84,10 @@ def test_payment_persistence_and_key_conflict(monkeypatch):
         with TestClient(app) as client:
             assert client.get('/payments/refunds/' + key, headers=headers).json() == first.json()
         with engine.connect() as conn:
-            assert conn.scalar(text('SELECT count(*) FROM payment_refunds WHERE payment_key=:key'), {'key': key}) == 1
+            assert conn.scalar(text('SELECT count(*) FROM refund.payment_refunds WHERE payment_key=:key'), {'key': key}) == 1
     finally:
         with engine.begin() as conn:
-            conn.execute(text('DELETE FROM payment_refunds WHERE payment_key=:key'), {'key': key})
+            conn.execute(text('DELETE FROM refund.payment_refunds WHERE payment_key=:key'), {'key': key})
         engine.dispose()
 
 
@@ -151,14 +151,14 @@ def test_real_http_response_loss_and_worker_restart(environment, monkeypatch):
         with business.connect() as conn:
             assert conn.scalar(text('SELECT state FROM refund_requests')) == 'succeeded'
         with payment_engine.connect() as conn:
-            assert conn.scalar(text('SELECT count(*) FROM payment_refunds WHERE payment_key=:key'),
+            assert conn.scalar(text('SELECT count(*) FROM refund.payment_refunds WHERE payment_key=:key'),
                                {'key': payment_key}) == 1
     finally:
         proc.terminate()
         proc.wait(timeout=5)
         if payment_key:
             with payment_engine.begin() as conn:
-                conn.execute(text('DELETE FROM payment_refunds WHERE payment_key=:key'), {'key': payment_key})
+                conn.execute(text('DELETE FROM refund.payment_refunds WHERE payment_key=:key'), {'key': payment_key})
         payment_engine.dispose()
 
 

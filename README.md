@@ -235,7 +235,7 @@ Compose 已包含 expiry 服务。I1 不会把 approved 展示成退款成功，
 
 ## I2 支付与 Worker
 
-为模拟支付创建独立 PostgreSQL 数据库和账号，业务服务不得直接访问支付表。配置 `PAYMENT_DATABASE_URL`、`PAYMENT_SERVICE_TOKEN` 和 `PAYMENT_BASE_URL`（本机示例 `http://127.0.0.1:8002`），业务库继续使用原有配置。支付 URL 使用 SQLAlchemy psycopg 格式；如需 TLS，请在支付 URL 中配置 PostgreSQL 连接参数。凭据只通过环境变量传入。分别运行：
+支付数据库默认连接同一 PostgreSQL 实例中的 `refunddesk_payment` 数据库，使用 `refund` schema；业务库仍使用 `helloagents`。组件连接默认复用 `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD` 和 TLS 配置，也可通过 `PAYMENT_DB_HOST`、`PAYMENT_DB_PORT`、`PAYMENT_DB_USER`、`PAYMENT_DB_PASSWORD`、`PAYMENT_DB_SSLMODE` 和 `PAYMENT_DB_SSL_ROOT_CERT` 单独覆盖。`PAYMENT_DB_NAME` 和 `PAYMENT_DB_SCHEMA` 默认分别为 `refunddesk_payment` 和 `refund`。如设置 `PAYMENT_DATABASE_URL`，该 URL 优先于连接组件；支付服务和初始化脚本共用该配置，并从工作目录 `.env` 加载环境变量。设置 `PAYMENT_SERVICE_TOKEN` 与 `PAYMENT_BASE_URL`（本机示例 `http://127.0.0.1:8002`）。初始化账号需具备数据库 `CREATE` 权限，运行账号需具备 schema `USAGE` 和表的相应权限。分别运行：
 
 ```bash
 uv run --locked alembic upgrade head
@@ -247,6 +247,6 @@ uv run --locked python -m refunddesk.entrypoints.worker
 
 `WORKER_LEASE_SECONDS`、`WORKER_RENEW_SECONDS` 和 `PAYMENT_TIMEOUT_SECONDS` 默认分别为 30、10、5。Worker 可多进程运行；核实最多 8 次或 15 分钟后进入人工状态。主管调用 `POST /api/refunds/{id}/reconcile` 时须提供 CSRF 和 `Idempotency-Key`，它只安排一次渠道查询；渠道无证据时继续保留预留。测试环境下主管可通过 `POST /api/orders/{order_no}/ship` 模拟发货。详情接口包含支付状态和审计时间线。
 
-开发或测试环境可设置支付进程 `PAYMENT_FAULT_MODE=drop_response`：退款记录提交后返回 503，Worker 会保留原支付键并重新查询。此故障配置不应在生产使用。支付库的初始化脚本与业务迁移独立。Compose 另设支付数据库；启动前还需设置 `RD_LOCAL_PAYMENT_PASSWORD` 和 `RD_LOCAL_PAYMENT_TOKEN`。
+开发或测试环境可设置支付进程 `PAYMENT_FAULT_MODE=drop_response`：退款记录提交后返回 503，Worker 会保留原支付键并重新查询。此故障配置不应在生产使用。支付库的初始化脚本与业务迁移独立。升级前停止支付服务及 Worker 并备份支付库；初始化发现旧的 `public.payment_refunds` 且目标表不存在时，会在同一事务中将其移动到目标 schema，保留支付键和记录。如果两张表同时存在，初始化会拒绝继续，需先核对数据并人工处理，不能直接创建一张空表替代旧记录。Compose 另设支付数据库；启动前还需设置 `RD_LOCAL_PAYMENT_PASSWORD` 和 `RD_LOCAL_PAYMENT_TOKEN`。
 
 运行包含真实支付 HTTP 故障测试的测试套件时，`PAYMENT_TEST_DATABASE_URL` 必须指向可丢弃的独立测试数据库；不设置时相关测试会跳过。

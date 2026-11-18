@@ -85,3 +85,44 @@ class LightsailTests(unittest.TestCase):
         with (patch.dict(os.environ, self.config(DB_SSLMODE="prefer"), clear=True),
               self.assertRaisesRegex(ValueError, "Choose")):
             database_options()
+
+
+class PaymentDatabaseTests(unittest.TestCase):
+    def test_shared_instance_components_and_schema(self) -> None:
+        from sqlalchemy.engine import make_url
+
+        from refunddesk.settings import payment_database_options
+
+        env = {'DB_HOST': '192.0.2.10', 'DB_PASSWORD': 'pass@word', 'DB_SSLMODE': 'disable'}
+        with patch.dict(os.environ, env, clear=True):
+            url, options = payment_database_options()
+        parsed = make_url(url)
+        self.assertEqual(parsed.database, 'refunddesk_payment')
+        self.assertEqual(parsed.password, 'pass@word')
+        self.assertEqual(options['options'], '-csearch_path=refund,pg_catalog')
+        self.assertEqual(options['sslmode'], 'disable')
+
+    def test_payment_overrides_and_invalid_schema(self) -> None:
+        from sqlalchemy.engine import make_url
+
+        from refunddesk.settings import payment_database_options
+
+        env = {'DB_HOST': 'old', 'DB_PASSWORD': 'old', 'DB_SSLMODE': 'disable',
+               'PAYMENT_DB_HOST': 'pay', 'PAYMENT_DB_PASSWORD': 'new',
+               'PAYMENT_DB_USER': 'payuser', 'PAYMENT_DB_SCHEMA': 'custom'}
+        with patch.dict(os.environ, env, clear=True):
+            url, options = payment_database_options()
+            self.assertEqual(make_url(url).host, 'pay')
+            self.assertEqual(make_url(url).username, 'payuser')
+            self.assertEqual(options['options'], '-csearch_path=custom,pg_catalog')
+            with (patch.dict(os.environ, {'PAYMENT_DB_SCHEMA': 'refund;drop schema public'}),
+                  self.assertRaisesRegex(ValueError, 'PAYMENT_DB_SCHEMA')):
+                payment_database_options()
+
+    def test_payment_url_query_options_cannot_override_search_path(self) -> None:
+        from refunddesk.settings import payment_database_options
+
+        env = {'PAYMENT_DATABASE_URL': 'postgresql+psycopg://u:p@db/db?options=unsafe',
+               'DB_SSLMODE': 'disable'}
+        with patch.dict(os.environ, env, clear=True), self.assertRaisesRegex(ValueError, 'search path'):
+            payment_database_options()

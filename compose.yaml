@@ -38,6 +38,8 @@ services:
     build: .
     environment: &payment-env
       APP_ENV: development
+      PAYMENT_DB_SSLMODE: disable
+      PAYMENT_DB_SCHEMA: refund
       PAYMENT_DATABASE_URL: postgresql+psycopg://payment:${RD_LOCAL_PAYMENT_PASSWORD:?set RD_LOCAL_PAYMENT_PASSWORD}@paymentdb:5432/refunddesk_payment
       PAYMENT_SERVICE_TOKEN: ${RD_LOCAL_PAYMENT_TOKEN:?set RD_LOCAL_PAYMENT_TOKEN}
     depends_on:
