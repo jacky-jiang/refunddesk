@@ -13,5 +13,5 @@ def open_engine() -> AsyncEngine:
 async def check_schema(engine: AsyncEngine) -> None:
     async with engine.connect() as conn:
         revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
-        if revision != "0003":
+        if revision != "0004":
             raise RuntimeError("Unexpected database revision")

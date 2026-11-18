@@ -259,7 +259,41 @@ class RefundService:
         async with self.factory() as uow:
             row = required(await uow.repo.request(actor.tenant_id, request_id))
             timeline = await uow.repo.audits(actor.tenant_id, {'request_id': request_id}, limit, offset)
-            return {'request': row, 'timeline': timeline, 'limit': limit, 'offset': offset}
+            return {'request': row, 'timeline': timeline, 'payment': await uow.repo.payment_progress(actor.tenant_id, request_id), 'limit': limit, 'offset': offset}
+
+    async def reconcile(self, actor: Actor, request_id: str, key: str, trace: str) -> Row:
+        actor.require('supervisor')
+        if not key or len(key) > 128:
+            raise BusinessError('IDEMPOTENCY_KEY_REQUIRED')
+        async with self.factory() as uow:
+            repo = uow.repo
+            await repo.lock_key(json.dumps([actor.tenant_id, actor.user_id, 'reconcile', key]))
+            previous = await repo.manual_key(actor.tenant_id, actor.user_id, key)
+            if previous:
+                if previous['request_id'] != request_id:
+                    raise BusinessError('IDEMPOTENCY_CONFLICT')
+                return required(await repo.request(actor.tenant_id, request_id))
+            row = required(await repo.request(actor.tenant_id, request_id))
+            required(await repo.order(actor.tenant_id, row['order_no'], lock=True))
+            row = required(await repo.request(actor.tenant_id, request_id, lock=True))
+            if row['state'] != 'manual':
+                raise BusinessError('STATE_CONFLICT')
+            await repo.schedule_manual(actor.tenant_id, actor.user_id, key, request_id)
+            await self.audit(repo, actor, request_id, 'manual_reconcile_requested', trace, {})
+            result = required(await repo.request(actor.tenant_id, request_id))
+            await uow.commit()
+            return result
+
+    async def ship(self, actor: Actor, number: str) -> Row:
+        actor.require('supervisor')
+        async with self.factory() as uow:
+            order = required(await uow.repo.order(actor.tenant_id, number, lock=True))
+            if order['paid_at'] is None or order['refund_state'] != 'none' or order['shipped_at']:
+                raise BusinessError('STATE_CONFLICT')
+            await uow.repo.ship(actor.tenant_id, number, self.clock.now())
+            result = required(await uow.repo.order(actor.tenant_id, number))
+            await uow.commit()
+            return {**result, 'refundable_amount_minor': 0}
 
     async def approvals(self, actor: Actor, limit: int, offset: int) -> list[Row]:
         actor.require('supervisor')

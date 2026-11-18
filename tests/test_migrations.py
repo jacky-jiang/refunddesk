@@ -43,7 +43,7 @@ def test_adopt_preserves_data_and_repeats(isolated_schema):
     command.upgrade(Config('alembic.ini'), 'head')
     with engine.connect() as conn:
         assert conn.scalar(text('SELECT name FROM tenants')) == 'Preserve me'
-        assert conn.scalar(text('SELECT version_num FROM alembic_version')) == '0003'
+        assert conn.scalar(text('SELECT version_num FROM alembic_version')) == '0004'
 
 
 def test_adopt_rejects_constraint_drift(isolated_schema):
@@ -90,7 +90,7 @@ def test_adopt_preserves_complete_demo_batch(isolated_schema):
         with engine.connect() as conn:
             return {table: conn.scalar(text(
                 f'SELECT jsonb_agg(row_data ORDER BY row_data::text) '
-                f'FROM (SELECT to_jsonb(t) AS row_data FROM "{schema}"."{table}" t) s'
+                f"FROM (SELECT to_jsonb(t) - ARRAY['lease_generation','manual_query','reconcile_started_at','reconcile_attempts'] AS row_data FROM \"{schema}\".\"{table}\" t) s"
             )) for table in tables}
 
     before = snapshot()

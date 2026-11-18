@@ -5,6 +5,8 @@ x-app: &app
     APP_ENV: development
     DB_SSLMODE: disable
     DATABASE_URL: postgresql+psycopg://refunddesk:${RD_LOCAL_PG_PASSWORD:?set RD_LOCAL_PG_PASSWORD}@db:5432/refunddesk_dev
+    PAYMENT_BASE_URL: http://payment:8002
+    PAYMENT_SERVICE_TOKEN: ${RD_LOCAL_PAYMENT_TOKEN:?set RD_LOCAL_PAYMENT_TOKEN}
   depends_on:
     migrate: {condition: service_completed_successfully}
 services:
@@ -20,6 +22,27 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+  paymentdb:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: refunddesk_payment
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: ${RD_LOCAL_PAYMENT_PASSWORD:?set RD_LOCAL_PAYMENT_PASSWORD}
+    volumes: [paymentdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD, pg_isready, -U, payment, -d, refunddesk_payment]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  payment-init:
+    build: .
+    environment: &payment-env
+      APP_ENV: development
+      PAYMENT_DATABASE_URL: postgresql+psycopg://payment:${RD_LOCAL_PAYMENT_PASSWORD:?set RD_LOCAL_PAYMENT_PASSWORD}@paymentdb:5432/refunddesk_payment
+      PAYMENT_SERVICE_TOKEN: ${RD_LOCAL_PAYMENT_TOKEN:?set RD_LOCAL_PAYMENT_TOKEN}
+    depends_on:
+      paymentdb: {condition: service_healthy}
+    command: [python, -m, refunddesk.entrypoints.payment_init]
   migrate:
     <<: *app
     depends_on:
@@ -40,7 +63,11 @@ services:
     ports: ["127.0.0.1:8001:8001"]
   payment:
     build: .
+    environment: *payment-env
+    depends_on:
+      payment-init: {condition: service_completed_successfully}
     command: [uvicorn, refunddesk.entrypoints.payment:app, --host, 0.0.0.0, --port, "8002"]
     ports: ["127.0.0.1:8002:8002"]
 volumes:
   pgdata:
+  paymentdata:

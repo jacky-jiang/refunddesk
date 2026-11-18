@@ -90,7 +90,7 @@ class SqlRepository:
 
     async def close_jobs(self, tenant: str, request_id: str) -> None:
         await self.execute('''UPDATE jobs SET state='done', lease_until=NULL,lease_owner=NULL
-            WHERE tenant_id=:t AND request_id=:id AND kind='execute' AND state='ready' ''',
+            WHERE tenant_id=:t AND request_id=:id AND kind='execute' AND state IN ('ready','leased') ''',
             {'t': tenant, 'id': request_id})
 
     async def audit(self, values: Row) -> None:
@@ -128,6 +128,29 @@ class SqlRepository:
         await self.execute('''INSERT INTO idempotency_records
             (tenant_id,user_id,action,key,payload_digest,request_id)
             VALUES (:tenant_id,:user_id,:action,:key,:payload_digest,:request_id)''', values)
+
+    async def payment_progress(self, tenant: str, request_id: str) -> Row | None:
+        return await self.one('''SELECT o.payment_key,o.state,o.channel_ref,j.state AS job_state,
+            j.reconcile_attempts,j.run_at FROM refund_operations o LEFT JOIN jobs j
+            ON j.tenant_id=o.tenant_id AND j.request_id=o.request_id AND j.kind='execute'
+            WHERE o.tenant_id=:t AND o.request_id=:r''', {'t': tenant, 'r': request_id})
+
+    async def manual_key(self, tenant: str, user: str, key: str) -> Row | None:
+        return await self.one('''SELECT request_id FROM manual_reconcile_keys
+            WHERE tenant_id=:t AND user_id=:u AND key=:k''', {'t': tenant, 'u': user, 'k': key})
+
+    async def schedule_manual(self, tenant: str, user: str, key: str, request_id: str) -> None:
+        await self.execute('''INSERT INTO manual_reconcile_keys(tenant_id,user_id,key,request_id)
+            VALUES (:t,:u,:k,:r)''', {'t': tenant, 'u': user, 'k': key, 'r': request_id})
+        await self.execute('''UPDATE jobs SET state='ready',run_at=now(),manual_query=true
+            WHERE tenant_id=:t AND request_id=:r AND kind='execute' AND state='manual' ''',
+            {'t': tenant, 'r': request_id})
+        await self.execute('''UPDATE refund_requests SET state='reconciling'
+            WHERE tenant_id=:t AND id=:r''', {'t': tenant, 'r': request_id})
+
+    async def ship(self, tenant: str, number: str, now: datetime) -> None:
+        await self.execute('UPDATE orders SET shipped_at=:now WHERE tenant_id=:t AND order_no=:n',
+                           {'t': tenant, 'n': number, 'now': now})
 
     async def approvals(self, tenant: str, now: datetime, limit: int, offset: int) -> list[Row]:
         return await self.many('''SELECT * FROM refund_requests WHERE tenant_id=:t

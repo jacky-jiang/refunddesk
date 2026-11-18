@@ -85,9 +85,19 @@ class AuditOut(BaseModel):
     trace_id: str
 
 
+class PaymentProgress(BaseModel):
+    payment_key: str
+    state: str
+    channel_ref: str | None
+    job_state: str | None
+    reconcile_attempts: int | None
+    run_at: datetime | None
+
+
 class DetailOut(BaseModel):
     request: RefundOut
     timeline: list[AuditOut]
+    payment: PaymentProgress | None = None
     limit: int
     offset: int
 

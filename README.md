@@ -1,6 +1,6 @@
 # RefundDesk
 
-当前 I1 提供登录会话、租户角色、订单与政策查询、资格评估、操作确认、创建/取消申请、主管审批、审计和过期扫描。HTTP API 不依赖模型。数据库最新版本为 Alembic `0003`，在原 `0002` 的 14 张业务表基础上新增凭据、会话和安全事件表。批准会原子创建执行任务，但 I1 不领取任务或调用支付；MCP 业务工具和前端仍属于后续迭代。
+当前 I2 在 I1 的申请、审批和审计基础上增加持久任务、模拟支付与恢复。业务数据库最新版本为 `0004`，支付服务使用独立数据库。MCP 业务工具和前端仍属于后续迭代。
 
 ## 1. 安装与环境配置（macOS / Linux）
 
@@ -56,7 +56,7 @@ uv run --locked alembic upgrade head
 
 该命令需要创建核验 schema、表以及写入版本表的权限。核验 schema 在成功时删除、失败时随事务回滚。锁等待超时为 5 秒，单语句超时为 60 秒，同 schema 的接管操作串行执行。它接受无版本、`0001` 或 `0002`，可重复执行，但不会核验演示数据的业务内容。
 
-`adopt_schema` 仅登记 `0002` 基线，之后 `alembic upgrade head` 追加身份表到 `0003 (head)`。已经升级到 `0003` 的库不再执行接管命令。**不要重新执行已有批次的演示数据脚本。**
+`adopt_schema` 仅登记 `0002` 基线，之后 `alembic upgrade head` 追加身份表及执行字段到 `0004 (head)`。已经升级到 `0003` 的库不再执行接管命令。**不要重新执行已有批次的演示数据脚本。**
 
 ### B. 新库，尚未建立业务表
 
@@ -89,7 +89,7 @@ uv run --locked alembic upgrade head
 | API | `uv run --locked uvicorn refunddesk.entrypoints.api:app --reload` | 本机端口 8000 |
 | MCP | `uv run --locked uvicorn refunddesk.entrypoints.mcp:app --port 8001` | 本机端口 8001，路径 `/mcp` |
 | 模拟支付 | `uv run --locked uvicorn refunddesk.entrypoints.payment:app --port 8002` | 本机端口 8002 |
-| Worker | `uv run --locked python -m refunddesk.entrypoints.worker` | 保留的 I0 入口，仅数据库检查，不执行支付 |
+| Worker | `uv run --locked python -m refunddesk.entrypoints.worker` | 保留的 I0 入口，领取执行和核实任务；`--once` 处理最多一条 |
 | 过期扫描 | `uv run --locked python -m refunddesk.entrypoints.expiry` | 每轮最多处理 100 条过期申请，间隔 30 秒；不调用支付 |
 
 在各终端按 `Ctrl+C` 停止对应进程。仅检查 Worker 的数据库就绪状态可执行：
@@ -107,7 +107,7 @@ curl -i http://127.0.0.1:8002/health/live
 curl -i -X OPTIONS http://127.0.0.1:8001/mcp
 ```
 
-API `live` 只检查进程；`ready` 查询目标 schema 的 `alembic_version`，要求版本为 `0003`。成功返回 200 和 `{"status":"ready"}`；数据库不可达、权限不足、缺失版本表或版本不匹配时返回 503 / `DATABASE_NOT_READY`。这不是对全部表结构的再次核验。API 响应包含 `X-Request-ID`，可关联 JSON 请求日志。
+API `live` 只检查进程；`ready` 查询目标 schema 的 `alembic_version`，要求版本为 `0004`。成功返回 200 和 `{"status":"ready"}`；数据库不可达、权限不足、缺失版本表或版本不匹配时返回 503 / `DATABASE_NOT_READY`。这不是对全部表结构的再次核验。API 响应包含 `X-Request-ID`，可关联 JSON 请求日志。
 
 模拟支付应返回包含 `mock-payment` 的健康响应。MCP OPTIONS 返回 200、204 或 405 均符合当前路由烟测预期，仅表示端点路由存在，不证明业务工具或授权已实现。
 
@@ -202,7 +202,7 @@ python scripts/check_architecture.py
 
 ## 9. I1 登录与 HTTP 演示
 
-先 `alembic upgrade head` 到 0003，再为已有用户单独设置密码（交互输入，至少 12 字符，
+先 `alembic upgrade head` 到 0004，再为已有用户单独设置密码（交互输入，至少 12 字符，
 不通过命令行参数传入密码）。密码更新会注销该用户全部会话：
 
 ```bash
@@ -232,3 +232,21 @@ uv run --locked python -m refunddesk.entrypoints.expiry
 
 旧附件中的演示申请时间不会刷新；启动扫描会按这些真实截止时间关闭已过期记录。
 Compose 已包含 expiry 服务。I1 不会把 approved 展示成退款成功，也不会消费已创建的 execute 任务。
+
+## I2 支付与 Worker
+
+为模拟支付创建独立 PostgreSQL 数据库和账号，业务服务不得直接访问支付表。配置 `PAYMENT_DATABASE_URL`、`PAYMENT_SERVICE_TOKEN` 和 `PAYMENT_BASE_URL`（本机示例 `http://127.0.0.1:8002`），业务库继续使用原有配置。支付 URL 使用 SQLAlchemy psycopg 格式；如需 TLS，请在支付 URL 中配置 PostgreSQL 连接参数。凭据只通过环境变量传入。分别运行：
+
+```bash
+uv run --locked alembic upgrade head
+uv run --locked python -m refunddesk.entrypoints.payment_init
+uv run --locked uvicorn refunddesk.entrypoints.payment:app --port 8002
+# 另一个终端
+uv run --locked python -m refunddesk.entrypoints.worker
+```
+
+`WORKER_LEASE_SECONDS`、`WORKER_RENEW_SECONDS` 和 `PAYMENT_TIMEOUT_SECONDS` 默认分别为 30、10、5。Worker 可多进程运行；核实最多 8 次或 15 分钟后进入人工状态。主管调用 `POST /api/refunds/{id}/reconcile` 时须提供 CSRF 和 `Idempotency-Key`，它只安排一次渠道查询；渠道无证据时继续保留预留。测试环境下主管可通过 `POST /api/orders/{order_no}/ship` 模拟发货。详情接口包含支付状态和审计时间线。
+
+开发或测试环境可设置支付进程 `PAYMENT_FAULT_MODE=drop_response`：退款记录提交后返回 503，Worker 会保留原支付键并重新查询。此故障配置不应在生产使用。支付库的初始化脚本与业务迁移独立。Compose 另设支付数据库；启动前还需设置 `RD_LOCAL_PAYMENT_PASSWORD` 和 `RD_LOCAL_PAYMENT_TOKEN`。
+
+运行包含真实支付 HTTP 故障测试的测试套件时，`PAYMENT_TEST_DATABASE_URL` 必须指向可丢弃的独立测试数据库；不设置时相关测试会跳过。

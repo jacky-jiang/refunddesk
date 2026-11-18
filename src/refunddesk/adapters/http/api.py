@@ -166,6 +166,20 @@ async def detail(request_id: Name, request: Request, actor: Current,
     return await refunds(request).detail(actor, request_id, limit, offset)
 
 
+@router.post('/refunds/{request_id}/reconcile', response_model=RefundOut)
+async def reconcile(request_id: Name, request: Request, actor: Current,
+                    idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Row:
+    return await refunds(request).reconcile(actor, request_id, idempotency_key, request.state.trace)
+
+
+@router.post('/orders/{order_no}/ship', response_model=OrderOut)
+async def ship(order_no: Name, request: Request, actor: Current) -> Row:
+    import os
+    if os.getenv('APP_ENV') not in {'development', 'test'}:
+        raise BusinessError('NOT_FOUND')
+    return await refunds(request).ship(actor, order_no)
+
+
 @router.get('/approvals', response_model=ApprovalPage)
 async def approvals(request: Request, actor: Current, limit: Limit = 20, offset: Offset = 0) -> Row:
     return {'items': await refunds(request).approvals(actor, limit, offset),
