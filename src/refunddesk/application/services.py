@@ -2,10 +2,24 @@ import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import Mapping
 from datetime import timedelta
 from uuid import uuid4
 
-from refunddesk.application.ports import Clock, Passwords, Repository, Row, UowFactory
+from refunddesk.application.ports import Clock, Passwords, Repository, UowFactory
+from refunddesk.application.types import (
+    Audit,
+    AuditFilters,
+    ConfirmationResult,
+    Detail,
+    Evaluation,
+    LoginResult,
+    NewRefund,
+    OrderResult,
+    Policy,
+    Refund,
+    Snapshot,
+)
 from refunddesk.domain.refunds import Actor, BusinessError, eligibility, expiration
 
 __all__ = ["Actor", "BusinessError", "IdentityService", "RefundService"]
@@ -15,11 +29,11 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def payload_digest(values: Row) -> str:
-    return digest(json.dumps(values, sort_keys=True, separators=(',', ':'), ensure_ascii=False))
+def payload_digest(values: Mapping[str, object]) -> str:
+    return digest(json.dumps(dict(values), sort_keys=True, separators=(',', ':'), ensure_ascii=False))
 
 
-def required(row: Row | None) -> Row:
+def required[T](row: T | None) -> T:
     if row is None:
         raise BusinessError('NOT_FOUND')
     return row
@@ -29,7 +43,7 @@ class IdentityService:
     def __init__(self, factory: UowFactory, clock: Clock, passwords: Passwords) -> None:
         self.factory, self.clock, self.passwords = factory, clock, passwords
 
-    async def login(self, user: str, password: str, tenant: str) -> Row:
+    async def login(self, user: str, password: str, tenant: str) -> LoginResult:
         async with self.factory() as uow:
             encoded = await uow.repo.credentials(user)
             # Password hashing runs in a thread, never on the ASGI event loop.
@@ -79,12 +93,12 @@ class RefundService:
             await uow.commit()
 
     async def audit(self, repo: Repository, actor: Actor, request_id: str, action: str,
-                    trace: str, details: Row) -> None:
+                    trace: str, details: dict[str, object]) -> None:
         await repo.audit({'tenant_id': actor.tenant_id, 'id': str(uuid4()),
             'occurred_at': self.clock.now(), 'actor': actor.user_id, 'request_id': request_id,
             'action': action, 'details': details, 'trace_id': trace})
 
-    async def expire(self, repo: Repository, row: Row, trace: str) -> bool:
+    async def expire(self, repo: Repository, row: Refund, trace: str) -> bool:
         reason = expiration(row, self.clock.now())
         if reason is None:
             return False
@@ -92,10 +106,11 @@ class RefundService:
         await repo.close_jobs(row['tenant_id'], row['id'])
         await self.audit(repo, Actor(row['tenant_id'], 'system:expiry', frozenset()), row['id'],
                          'expired', trace, {'from': row['state'], 'state': 'closed', 'reason': reason})
-        row.update(state='closed', close_reason=reason)
+        row['state'] = 'closed'
+        row['close_reason'] = reason
         return True
 
-    async def order(self, actor: Actor, number: str) -> Row:
+    async def order(self, actor: Actor, number: str) -> OrderResult:
         async with self.factory() as uow:
             row = required(await uow.repo.order(actor.tenant_id, number))
             active = await uow.repo.active(actor.tenant_id, number)
@@ -103,17 +118,17 @@ class RefundService:
                 active is not None and expiration(active, self.clock.now()) is None)
             return {**row, 'refundable_amount_minor': 0 if blocked else row['amount_minor']}
 
-    async def policy(self, actor: Actor, version: str | None = None) -> Row:
+    async def policy(self, actor: Actor, version: str | None = None) -> Policy:
         async with self.factory() as uow:
             return required(await uow.repo.policy(actor.tenant_id, self.clock.now(), version))
 
-    def validate_policy(self, policy: Row) -> None:
+    def validate_policy(self, policy: Policy) -> None:
         expected = {'apply_hours': 168, 'approval_hours': 24, 'execution_start_minutes': 30,
                     'full_refund_only': True, 'unshipped_only': True, 'supervisor_required': True}
         if any(policy['rules'].get(k) != v for k, v in expected.items()):
             raise BusinessError('POLICY_UNSUPPORTED')
 
-    async def evaluate(self, actor: Actor, number: str) -> Row:
+    async def evaluate(self, actor: Actor, number: str) -> Evaluation:
         async with self.factory() as uow:
             order = required(await uow.repo.order(actor.tenant_id, number))
             policy = required(await uow.repo.policy(actor.tenant_id, self.clock.now()))
@@ -127,7 +142,7 @@ class RefundService:
                     'policy_version': policy['version'], 'evaluated_at': self.clock.now()}
 
     async def snapshot(self, repo: Repository, actor: Actor, action: str, target: str,
-                       reason: str) -> Row:
+                       reason: str) -> Snapshot:
         if action == 'create':
             order = required(await repo.order(actor.tenant_id, target, lock=True))
             policy = required(await repo.policy(actor.tenant_id, self.clock.now()))
@@ -145,7 +160,7 @@ class RefundService:
         return {'action': action, 'target': target, 'reason': reason,
                 'amount_minor': row['amount_minor'], 'currency': row['currency']}
 
-    async def confirm(self, actor: Actor, action: str, target: str, reason: str) -> Row:
+    async def confirm(self, actor: Actor, action: str, target: str, reason: str) -> ConfirmationResult:
         actor.require('support')
         async with self.factory() as uow:
             snapshot = await self.snapshot(uow.repo, actor, action, target, reason)
@@ -159,7 +174,7 @@ class RefundService:
                     'confirmed_action': snapshot}
 
     async def use_confirmation(self, repo: Repository, actor: Actor, confirmation_id: str,
-                               snapshot: Row) -> None:
+                               snapshot: Snapshot) -> None:
         row = await repo.confirmation(actor.tenant_id, confirmation_id)
         now = self.clock.now()
         if (row is None or row['user_id'] != actor.user_id or row['action'] != snapshot['action']
@@ -169,7 +184,7 @@ class RefundService:
         await repo.consume(actor.tenant_id, confirmation_id, now)
 
     async def write(self, actor: Actor, action: str, target: str, reason: str,
-                    confirmation_id: str, key: str, trace: str) -> Row:
+                    confirmation_id: str, key: str, trace: str) -> Refund:
         actor.require('support')
         if not key or len(key) > 128:
             raise BusinessError('IDEMPOTENCY_KEY_REQUIRED')
@@ -200,13 +215,14 @@ class RefundService:
                         # The independent scanner persists expiry in its own transaction.
                         raise BusinessError('ORDER_NOT_ELIGIBLE')
                     now = self.clock.now()
-                    row = {'tenant_id': actor.tenant_id, 'id': str(uuid4()), 'order_no': target,
+                    new_row: NewRefund = {'tenant_id': actor.tenant_id, 'id': str(uuid4()), 'order_no': target,
                            'applicant_id': actor.user_id, 'reason': reason,
                            'amount_minor': snapshot['amount_minor'], 'currency': snapshot['currency'],
                            'policy_version': snapshot['policy_version'], 'created_at': now,
                            'approve_by': now + timedelta(hours=24)}
-                    await repo.add_request(row)
-                    await self.audit(repo, actor, row['id'], 'submitted', trace, {'state': 'pending'})
+                    await repo.add_request(new_row)
+                    await self.audit(repo, actor, new_row['id'], 'submitted', trace, {'state': 'pending'})
+                    row = required(await repo.request(actor.tenant_id, new_row['id']))
             else:
                 row = required(await repo.request(actor.tenant_id, target, lock=True))
                 if await self.expire(repo, row, trace):
@@ -223,7 +239,7 @@ class RefundService:
             await uow.commit()
             return result
 
-    async def decide(self, actor: Actor, request_id: str, decision: str, note: str, trace: str) -> Row:
+    async def decide(self, actor: Actor, request_id: str, decision: str, note: str, trace: str) -> Refund:
         actor.require('supervisor')
         if decision not in {'approve', 'reject'}:
             raise BusinessError('INVALID_DECISION')
@@ -255,13 +271,13 @@ class RefundService:
             await uow.commit()
             return result
 
-    async def detail(self, actor: Actor, request_id: str, limit: int = 100, offset: int = 0) -> Row:
+    async def detail(self, actor: Actor, request_id: str, limit: int = 100, offset: int = 0) -> Detail:
         async with self.factory() as uow:
             row = required(await uow.repo.request(actor.tenant_id, request_id))
             timeline = await uow.repo.audits(actor.tenant_id, {'request_id': request_id}, limit, offset)
             return {'request': row, 'timeline': timeline, 'payment': await uow.repo.payment_progress(actor.tenant_id, request_id), 'limit': limit, 'offset': offset}
 
-    async def reconcile(self, actor: Actor, request_id: str, key: str, trace: str) -> Row:
+    async def reconcile(self, actor: Actor, request_id: str, key: str, trace: str) -> Refund:
         actor.require('supervisor')
         if not key or len(key) > 128:
             raise BusinessError('IDEMPOTENCY_KEY_REQUIRED')
@@ -284,7 +300,7 @@ class RefundService:
             await uow.commit()
             return result
 
-    async def ship(self, actor: Actor, number: str) -> Row:
+    async def ship(self, actor: Actor, number: str) -> OrderResult:
         actor.require('supervisor')
         async with self.factory() as uow:
             order = required(await uow.repo.order(actor.tenant_id, number, lock=True))
@@ -295,12 +311,12 @@ class RefundService:
             await uow.commit()
             return {**result, 'refundable_amount_minor': 0}
 
-    async def approvals(self, actor: Actor, limit: int, offset: int) -> list[Row]:
+    async def approvals(self, actor: Actor, limit: int, offset: int) -> list[Refund]:
         actor.require('supervisor')
         async with self.factory() as uow:
             return await uow.repo.approvals(actor.tenant_id, self.clock.now(), limit, offset)
 
-    async def audits(self, actor: Actor, filters: Row, limit: int, offset: int) -> list[Row]:
+    async def audits(self, actor: Actor, filters: AuditFilters, limit: int, offset: int) -> list[Audit]:
         async with self.factory() as uow:
             return await uow.repo.audits(actor.tenant_id, filters, limit, offset)
 

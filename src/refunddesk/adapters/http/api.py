@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
@@ -15,7 +16,6 @@ from refunddesk.adapters.http.schemas import (
     PolicyOut,
     RefundOut,
 )
-from refunddesk.application.ports import Row
 from refunddesk.application.services import Actor, BusinessError, IdentityService, RefundService
 
 router = APIRouter(prefix='/api')
@@ -89,7 +89,7 @@ Current = Annotated[Actor, Depends(current)]
 
 @router.post('/auth/login', response_model=LoginOut)
 async def login(data: Login, request: Request, response: Response,
-                x_csrf_protection: Annotated[str | None, Header()] = None) -> Row:
+                x_csrf_protection: Annotated[str | None, Header()] = None) -> Mapping[str, object]:
     # A custom header forces cross-origin browsers to preflight; no CORS credentials allowed.
     if x_csrf_protection != '1':
         raise BusinessError('CSRF_INVALID')
@@ -117,63 +117,63 @@ async def logout(request: Request, actor: Current) -> Response:
 
 
 @router.get('/auth/me', response_model=IdentityOut)
-async def me(actor: Current) -> Row:
+async def me(actor: Current) -> Mapping[str, object]:
     return {'user_id': actor.user_id, 'tenant_id': actor.tenant_id, 'roles': sorted(actor.roles)}
 
 
 @router.get('/orders/{order_no}', response_model=OrderOut)
-async def order(order_no: Name, request: Request, actor: Current) -> Row:
+async def order(order_no: Name, request: Request, actor: Current) -> Mapping[str, object]:
     return await refunds(request).order(actor, order_no)
 
 
 @router.get('/refund-policies/current', response_model=PolicyOut)
-async def current_policy(request: Request, actor: Current) -> Row:
+async def current_policy(request: Request, actor: Current) -> Mapping[str, object]:
     return await refunds(request).policy(actor)
 
 
 @router.get('/refund-policies/{version}', response_model=PolicyOut)
-async def version_policy(version: Name, request: Request, actor: Current) -> Row:
+async def version_policy(version: Name, request: Request, actor: Current) -> Mapping[str, object]:
     return await refunds(request).policy(actor, version)
 
 
 @router.post('/orders/{order_no}/refund-evaluation', response_model=EvaluationOut)
-async def evaluate(order_no: Name, request: Request, actor: Current) -> Row:
+async def evaluate(order_no: Name, request: Request, actor: Current) -> Mapping[str, object]:
     return await refunds(request).evaluate(actor, order_no)
 
 
 @router.post('/action-confirmations', status_code=201, response_model=ConfirmationOut)
-async def confirm(data: Confirmation, request: Request, actor: Current) -> Row:
+async def confirm(data: Confirmation, request: Request, actor: Current) -> Mapping[str, object]:
     return await refunds(request).confirm(actor, data.action, data.target, data.reason)
 
 
 @router.post('/refunds', response_model=RefundOut)
 async def create(data: Create, request: Request, actor: Current,
-                 idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Row:
+                 idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Mapping[str, object]:
     return await refunds(request).write(actor, 'create', data.order_no, data.reason,
         data.confirmation_id, idempotency_key, request.state.trace)
 
 
 @router.post('/refunds/{request_id}/cancel', response_model=RefundOut)
 async def cancel(request_id: Name, data: Cancel, request: Request, actor: Current,
-                 idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Row:
+                 idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Mapping[str, object]:
     return await refunds(request).write(actor, 'cancel', request_id, data.reason,
         data.confirmation_id, idempotency_key, request.state.trace)
 
 
 @router.get('/refunds/{request_id}', response_model=DetailOut)
 async def detail(request_id: Name, request: Request, actor: Current,
-                 limit: Limit = 100, offset: Offset = 0) -> Row:
+                 limit: Limit = 100, offset: Offset = 0) -> Mapping[str, object]:
     return await refunds(request).detail(actor, request_id, limit, offset)
 
 
 @router.post('/refunds/{request_id}/reconcile', response_model=RefundOut)
 async def reconcile(request_id: Name, request: Request, actor: Current,
-                    idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Row:
+                    idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]) -> Mapping[str, object]:
     return await refunds(request).reconcile(actor, request_id, idempotency_key, request.state.trace)
 
 
 @router.post('/orders/{order_no}/ship', response_model=OrderOut)
-async def ship(order_no: Name, request: Request, actor: Current) -> Row:
+async def ship(order_no: Name, request: Request, actor: Current) -> Mapping[str, object]:
     import os
     if os.getenv('APP_ENV') not in {'development', 'test'}:
         raise BusinessError('NOT_FOUND')
@@ -181,13 +181,13 @@ async def ship(order_no: Name, request: Request, actor: Current) -> Row:
 
 
 @router.get('/approvals', response_model=ApprovalPage)
-async def approvals(request: Request, actor: Current, limit: Limit = 20, offset: Offset = 0) -> Row:
+async def approvals(request: Request, actor: Current, limit: Limit = 20, offset: Offset = 0) -> Mapping[str, object]:
     return {'items': await refunds(request).approvals(actor, limit, offset),
             'limit': limit, 'offset': offset}
 
 
 @router.post('/approvals/{request_id}/decision', response_model=RefundOut)
-async def decision(request_id: Name, data: Decision, request: Request, actor: Current) -> Row:
+async def decision(request_id: Name, data: Decision, request: Request, actor: Current) -> Mapping[str, object]:
     return await refunds(request).decide(actor, request_id, data.decision, data.note, request.state.trace)
 
 
@@ -195,7 +195,7 @@ async def decision(request_id: Name, data: Decision, request: Request, actor: Cu
 async def audits(request: Request, actor: Current, limit: Limit = 20, offset: Offset = 0,
                  user_id: Name | None = None, order_no: Name | None = None,
                  request_id: Name | None = None, since: AwareDatetime | None = None,
-                 until: AwareDatetime | None = None) -> Row:
+                 until: AwareDatetime | None = None) -> Mapping[str, object]:
     if since and until and since > until:
         raise BusinessError('INVALID_TIME_RANGE')
     return {'items': await refunds(request).audits(actor,

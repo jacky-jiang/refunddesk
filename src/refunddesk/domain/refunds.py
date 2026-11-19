@@ -1,6 +1,20 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TypedDict
+
+
+class EligibilityOrder(TypedDict):
+    paid_at: datetime | None
+    shipped_at: datetime | None
+    refund_state: str
+    amount_minor: int
+    currency: str
+
+
+class ExpiringRequest(TypedDict):
+    state: str
+    approve_by: datetime
+    start_by: datetime | None
 
 
 class BusinessError(Exception):
@@ -20,7 +34,7 @@ class Actor:
             raise BusinessError('FORBIDDEN')
 
 
-def eligibility(order: dict[str, Any], now: datetime) -> list[str]:
+def eligibility(order: EligibilityOrder, now: datetime) -> list[str]:
     reasons = []
     paid = order['paid_at']
     if paid is None:
@@ -39,7 +53,7 @@ def eligibility(order: dict[str, Any], now: datetime) -> list[str]:
     return reasons
 
 
-def expiration(request: dict[str, Any], now: datetime) -> str | None:
+def expiration(request: ExpiringRequest, now: datetime) -> str | None:
     if request['state'] == 'pending' and now >= request['approve_by']:
         return 'APPROVAL_EXPIRED'
     if (request['state'] == 'approved' and request['start_by'] is not None

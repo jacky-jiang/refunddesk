@@ -1,30 +1,74 @@
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from types import TracebackType
-from typing import Self
+from typing import Self, TypeVar
 
+from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncTransaction
 
-from refunddesk.application.ports import Repository, Row
+from refunddesk.application.ports import Repository
+from refunddesk.application.types import (
+    Audit,
+    AuditFilters,
+    Confirmation,
+    Decision,
+    DueRefund,
+    Idempotency,
+    Identity,
+    Job,
+    ManualKey,
+    NewConfirmation,
+    NewRefund,
+    Order,
+    PaymentProgress,
+    Policy,
+    Refund,
+    SecurityEvent,
+    Session,
+)
+
+T = TypeVar('T')
+
+IDENTITY_ADAPTER = TypeAdapter(Identity)
+SESSION_ADAPTER = TypeAdapter(Session)
+ORDER_ADAPTER = TypeAdapter(Order)
+POLICY_ADAPTER = TypeAdapter(Policy)
+REFUND_ADAPTER = TypeAdapter(Refund)
+CONFIRMATION_ADAPTER = TypeAdapter(Confirmation)
+IDEMPOTENCY_ADAPTER = TypeAdapter(Idempotency)
+PAYMENTPROGRESS_ADAPTER = TypeAdapter(PaymentProgress)
+MANUALKEY_ADAPTER = TypeAdapter(ManualKey)
+AUDIT_ADAPTER = TypeAdapter(Audit)
+DUEREFUND_ADAPTER = TypeAdapter(DueRefund)
 
 
 class SqlRepository:
     def __init__(self, connection: AsyncConnection) -> None:
         self.conn = connection
 
-    async def one(self, sql: str, values: Row) -> Row | None:
-        row = (await self.conn.execute(text(sql), values)).mappings().first()
+    async def one(self, sql: str, values: Mapping[str, object]) -> dict[str, object] | None:
+        row = (await self.conn.execute(text(sql), dict(values))).mappings().first()
         return dict(row) if row else None
 
-    async def many(self, sql: str, values: Row) -> list[Row]:
-        return [dict(row) for row in (await self.conn.execute(text(sql), values)).mappings()]
+    async def many(self, sql: str, values: Mapping[str, object]) -> list[dict[str, object]]:
+        return [dict(row) for row in (await self.conn.execute(text(sql), dict(values))).mappings()]
 
-    async def execute(self, sql: str, values: Row) -> None:
-        await self.conn.execute(text(sql), values)
+    async def execute(self, sql: str, values: Mapping[str, object]) -> None:
+        await self.conn.execute(text(sql), dict(values))
 
-    async def identity(self, user: str, tenant: str) -> Row | None:
-        return await self.one('''SELECT u.id, u.display_name, array_agg(m.role ORDER BY m.role) roles
+    async def one_typed(self, adapter: TypeAdapter[T], sql: str,
+                        values: Mapping[str, object]) -> T | None:
+        row = await self.one(sql, values)
+        return adapter.validate_python(row, strict=True) if row is not None else None
+
+    async def many_typed(self, adapter: TypeAdapter[T], sql: str,
+                         values: Mapping[str, object]) -> list[T]:
+        return [adapter.validate_python(row, strict=True) for row in await self.many(sql, values)]
+
+    async def identity(self, user: str, tenant: str) -> Identity | None:
+        return await self.one_typed(IDENTITY_ADAPTER, '''SELECT u.id, u.display_name, array_agg(m.role ORDER BY m.role) roles
             FROM users u JOIN memberships m ON m.user_id=u.id
             WHERE u.id=:user AND m.tenant_id=:tenant AND u.enabled
             GROUP BY u.id, u.display_name''', {'user': user, 'tenant': tenant})
@@ -35,10 +79,10 @@ class SqlRepository:
                              {'user': user})
         return str(row['password_hash']) if row else None
 
-    async def session(self, token_hash: str) -> Row | None:
-        return await self.one('SELECT * FROM auth_sessions WHERE token_hash=:token', {'token': token_hash})
+    async def session(self, token_hash: str) -> Session | None:
+        return await self.one_typed(SESSION_ADAPTER, 'SELECT * FROM auth_sessions WHERE token_hash=:token', {'token': token_hash})
 
-    async def save_session(self, values: Row) -> None:
+    async def save_session(self, values: Session) -> None:
         await self.execute('''INSERT INTO auth_sessions
             (token_hash, user_id, tenant_id, csrf_hash, expires_at, created_at)
             VALUES (:token_hash,:user_id,:tenant_id,:csrf_hash,:expires_at,:created_at)''', values)
@@ -46,26 +90,26 @@ class SqlRepository:
     async def delete_session(self, token_hash: str) -> None:
         await self.execute('DELETE FROM auth_sessions WHERE token_hash=:token', {'token': token_hash})
 
-    async def order(self, tenant: str, order_no: str, lock: bool = False) -> Row | None:
-        return await self.one('SELECT * FROM orders WHERE tenant_id=:t AND order_no=:n'
+    async def order(self, tenant: str, order_no: str, lock: bool = False) -> Order | None:
+        return await self.one_typed(ORDER_ADAPTER, 'SELECT * FROM orders WHERE tenant_id=:t AND order_no=:n'
                               + (' FOR UPDATE' if lock else ''), {'t': tenant, 'n': order_no})
 
-    async def policy(self, tenant: str, now: datetime, version: str | None = None) -> Row | None:
-        return await self.one('''SELECT * FROM refund_policies WHERE tenant_id=:t AND '''
+    async def policy(self, tenant: str, now: datetime, version: str | None = None) -> Policy | None:
+        return await self.one_typed(POLICY_ADAPTER, '''SELECT * FROM refund_policies WHERE tenant_id=:t AND '''
             + ('version=:version' if version is not None else 'effective_at<=:now')
             + ' ORDER BY effective_at DESC, version DESC LIMIT 1',
             {'t': tenant, 'now': now, 'version': version})
 
-    async def request(self, tenant: str, request_id: str, lock: bool = False) -> Row | None:
-        return await self.one('SELECT * FROM refund_requests WHERE tenant_id=:t AND id=:id'
+    async def request(self, tenant: str, request_id: str, lock: bool = False) -> Refund | None:
+        return await self.one_typed(REFUND_ADAPTER, 'SELECT * FROM refund_requests WHERE tenant_id=:t AND id=:id'
                               + (' FOR UPDATE' if lock else ''), {'t': tenant, 'id': request_id})
 
-    async def active(self, tenant: str, order_no: str) -> Row | None:
-        return await self.one('''SELECT * FROM refund_requests WHERE tenant_id=:t AND order_no=:n
+    async def active(self, tenant: str, order_no: str) -> Refund | None:
+        return await self.one_typed(REFUND_ADAPTER, '''SELECT * FROM refund_requests WHERE tenant_id=:t AND order_no=:n
             AND state IN ('pending','approved','executing','reconciling','manual','succeeded')''',
             {'t': tenant, 'n': order_no})
 
-    async def add_request(self, values: Row) -> None:
+    async def add_request(self, values: NewRefund) -> None:
         await self.execute('''INSERT INTO refund_requests
             (tenant_id,id,order_no,applicant_id,reason,amount_minor,currency,policy_version,
              state,created_at,approve_by) VALUES
@@ -78,12 +122,12 @@ class SqlRepository:
             start_by=COALESCE(:start_by,start_by) WHERE tenant_id=:t AND id=:id''',
             {'t': tenant, 'id': request_id, 'state': state, 'reason': reason, 'start_by': start_by})
 
-    async def decision(self, values: Row) -> None:
+    async def decision(self, values: Decision) -> None:
         await self.execute('''INSERT INTO refund_decisions
             (tenant_id,request_id,applicant_id,reviewer_id,decision,note,decided_at)
             VALUES (:tenant_id,:request_id,:applicant_id,:reviewer_id,:decision,:note,:decided_at)''', values)
 
-    async def job(self, values: Row) -> None:
+    async def job(self, values: Job) -> None:
         await self.execute('''INSERT INTO jobs
             (tenant_id,id,request_id,kind,state,run_at,attempts)
             VALUES (:tenant_id,:id,:request_id,'execute','ready',:run_at,0)''', values)
@@ -93,22 +137,22 @@ class SqlRepository:
             WHERE tenant_id=:t AND request_id=:id AND kind='execute' AND state IN ('ready','leased') ''',
             {'t': tenant, 'id': request_id})
 
-    async def audit(self, values: Row) -> None:
+    async def audit(self, values: Audit) -> None:
         await self.execute('''INSERT INTO audit_events
             (tenant_id,id,occurred_at,actor,request_id,action,details,trace_id)
             VALUES (:tenant_id,:id,:occurred_at,:actor,:request_id,:action,CAST(:details AS jsonb),:trace_id)''',
             {**values, 'details': json.dumps(values['details'])})
 
-    async def security(self, values: Row) -> None:
+    async def security(self, values: SecurityEvent) -> None:
         await self.execute('''INSERT INTO security_events
             (id,occurred_at,actor,tenant_id,code,trace_id)
             VALUES (:id,:occurred_at,:actor,:tenant_id,:code,:trace_id)''', values)
 
-    async def confirmation(self, tenant: str, confirmation_id: str) -> Row | None:
-        return await self.one('''SELECT * FROM action_confirmations
+    async def confirmation(self, tenant: str, confirmation_id: str) -> Confirmation | None:
+        return await self.one_typed(CONFIRMATION_ADAPTER, '''SELECT * FROM action_confirmations
             WHERE tenant_id=:t AND id=:id FOR UPDATE''', {'t': tenant, 'id': confirmation_id})
 
-    async def add_confirmation(self, values: Row) -> None:
+    async def add_confirmation(self, values: NewConfirmation) -> None:
         await self.execute('''INSERT INTO action_confirmations
             (tenant_id,id,user_id,action,payload_digest,expires_at)
             VALUES (:tenant_id,:id,:user_id,:action,:payload_digest,:expires_at)''', values)
@@ -120,23 +164,23 @@ class SqlRepository:
     async def lock_key(self, key: str) -> None:
         await self.execute('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))', {'key': key})
 
-    async def idempotency(self, tenant: str, user: str, action: str, key: str) -> Row | None:
-        return await self.one('''SELECT * FROM idempotency_records WHERE tenant_id=:t
+    async def idempotency(self, tenant: str, user: str, action: str, key: str) -> Idempotency | None:
+        return await self.one_typed(IDEMPOTENCY_ADAPTER, '''SELECT * FROM idempotency_records WHERE tenant_id=:t
             AND user_id=:u AND action=:a AND key=:k''', {'t': tenant, 'u': user, 'a': action, 'k': key})
 
-    async def add_idempotency(self, values: Row) -> None:
+    async def add_idempotency(self, values: Idempotency) -> None:
         await self.execute('''INSERT INTO idempotency_records
             (tenant_id,user_id,action,key,payload_digest,request_id)
             VALUES (:tenant_id,:user_id,:action,:key,:payload_digest,:request_id)''', values)
 
-    async def payment_progress(self, tenant: str, request_id: str) -> Row | None:
-        return await self.one('''SELECT o.payment_key,o.state,o.channel_ref,j.state AS job_state,
+    async def payment_progress(self, tenant: str, request_id: str) -> PaymentProgress | None:
+        return await self.one_typed(PAYMENTPROGRESS_ADAPTER, '''SELECT o.payment_key,o.state,o.channel_ref,j.state AS job_state,
             j.reconcile_attempts,j.run_at FROM refund_operations o LEFT JOIN jobs j
             ON j.tenant_id=o.tenant_id AND j.request_id=o.request_id AND j.kind='execute'
             WHERE o.tenant_id=:t AND o.request_id=:r''', {'t': tenant, 'r': request_id})
 
-    async def manual_key(self, tenant: str, user: str, key: str) -> Row | None:
-        return await self.one('''SELECT request_id FROM manual_reconcile_keys
+    async def manual_key(self, tenant: str, user: str, key: str) -> ManualKey | None:
+        return await self.one_typed(MANUALKEY_ADAPTER, '''SELECT request_id FROM manual_reconcile_keys
             WHERE tenant_id=:t AND user_id=:u AND key=:k''', {'t': tenant, 'u': user, 'k': key})
 
     async def schedule_manual(self, tenant: str, user: str, key: str, request_id: str) -> None:
@@ -152,24 +196,24 @@ class SqlRepository:
         await self.execute('UPDATE orders SET shipped_at=:now WHERE tenant_id=:t AND order_no=:n',
                            {'t': tenant, 'n': number, 'now': now})
 
-    async def approvals(self, tenant: str, now: datetime, limit: int, offset: int) -> list[Row]:
-        return await self.many('''SELECT * FROM refund_requests WHERE tenant_id=:t
+    async def approvals(self, tenant: str, now: datetime, limit: int, offset: int) -> list[Refund]:
+        return await self.many_typed(REFUND_ADAPTER, '''SELECT * FROM refund_requests WHERE tenant_id=:t
             AND state='pending' AND approve_by>:now ORDER BY created_at,id LIMIT :lim OFFSET :off''',
             {'t': tenant, 'now': now, 'lim': limit, 'off': offset})
 
-    async def audits(self, tenant: str, filters: Row, limit: int, offset: int) -> list[Row]:
+    async def audits(self, tenant: str, filters: AuditFilters, limit: int, offset: int) -> list[Audit]:
         clauses = ['a.tenant_id=:t']
         mapping = {'user_id': 'a.actor=:user_id', 'order_no': 'r.order_no=:order_no',
                    'request_id': 'a.request_id=:request_id', 'since': 'a.occurred_at>=:since',
                    'until': 'a.occurred_at<=:until'}
         clauses.extend(clause for key, clause in mapping.items() if filters.get(key) is not None)
-        return await self.many('''SELECT a.* FROM audit_events a JOIN refund_requests r
+        return await self.many_typed(AUDIT_ADAPTER, '''SELECT a.* FROM audit_events a JOIN refund_requests r
             ON r.tenant_id=a.tenant_id AND r.id=a.request_id WHERE ''' + ' AND '.join(clauses)
             + ' ORDER BY a.occurred_at,a.id LIMIT :lim OFFSET :off',
             {**filters, 't': tenant, 'lim': limit, 'off': offset})
 
-    async def due(self, now: datetime, limit: int) -> list[Row]:
-        return await self.many('''SELECT tenant_id,id FROM refund_requests
+    async def due(self, now: datetime, limit: int) -> list[DueRefund]:
+        return await self.many_typed(DUEREFUND_ADAPTER, '''SELECT tenant_id,id FROM refund_requests
             WHERE (state='pending' AND approve_by<=:now) OR (state='approved' AND start_by<=:now)
             ORDER BY created_at,tenant_id,id LIMIT :lim''', {'now': now, 'lim': limit})
 
